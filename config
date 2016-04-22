@@ -88,7 +88,7 @@ if [ "$ngx_module_link" = "" ] ; then
 	# Old nginx version
 	ngx_module_link=NONE
 
-	CORE_MODULES="$CORE_MODULES $RTMP_CORE_MODULES"
+	EVENT_MODULES="$EVENT_MODULES $RTMP_CORE_MODULES"
 	HTTP_MODULES="$HTTP_MODULES $RTMP_HTTP_MODULES"
 	NGX_ADDON_DEPS="$NGX_ADDON_DEPS $RTMP_DEPS"
 	NGX_ADDON_SRCS="$NGX_ADDON_SRCS $RTMP_CORE_SRCS $RTMP_HTTP_SRCS"
@@ -99,7 +99,7 @@ if [ $ngx_module_link = DYNAMIC ] ; then
     ngx_module_srcs="$RTMP_CORE_SRCS $RTMP_HTTP_SRCS"
     . auto/module
 elif [ $ngx_module_link = ADDON ] ; then
-    ngx_module_type=CORE
+    ngx_module_type=EVENT
     ngx_module_name=$RTMP_CORE_MODULES
     ngx_module_srcs=$RTMP_CORE_SRCS
     . auto/module
