@@ -3,31 +3,27 @@
  * Copyright (C) Roman Arutyunyan
  */
 
-
-#include <ngx_config.h>
-#include <ngx_core.h>
 #include "ngx_rtmp.h"
 #include "ngx_rtmp_proxy_protocol.h"
-
+#include <ngx_config.h>
+#include <ngx_core.h>
 
 static void ngx_rtmp_close_connection(ngx_connection_t *c);
-static u_char * ngx_rtmp_log_error(ngx_log_t *log, u_char *buf, size_t len);
+static u_char *ngx_rtmp_log_error(ngx_log_t *log, u_char *buf, size_t len);
 
-
-void
-ngx_rtmp_init_connection(ngx_connection_t *c)
+void ngx_rtmp_init_connection(ngx_connection_t *c)
 {
-    ngx_uint_t             i;
-    ngx_rtmp_port_t       *port;
-    struct sockaddr       *sa;
-    struct sockaddr_in    *sin;
-    ngx_rtmp_in_addr_t    *addr;
-    ngx_rtmp_session_t    *s;
-    ngx_rtmp_addr_conf_t  *addr_conf;
-    ngx_int_t              unix_socket;
+    ngx_uint_t i;
+    ngx_rtmp_port_t *port;
+    struct sockaddr *sa;
+    struct sockaddr_in *sin;
+    ngx_rtmp_in_addr_t *addr;
+    ngx_rtmp_session_t *s;
+    ngx_rtmp_addr_conf_t *addr_conf;
+    ngx_int_t unix_socket;
 #if (NGX_HAVE_INET6)
-    struct sockaddr_in6   *sin6;
-    ngx_rtmp_in6_addr_t   *addr6;
+    struct sockaddr_in6 *sin6;
+    ngx_rtmp_in6_addr_t *addr6;
 #endif
 
     ++ngx_rtmp_naccepted;
@@ -36,11 +32,10 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
 
     /* AF_INET only */
 
-    port = c->listening->servers;
+    port        = c->listening->servers;
     unix_socket = 0;
 
     if (port->naddrs > 1) {
-
         /*
          * There are several addresses on this port and one of them
          * is the "*:port" wildcard so getsockname() is needed to determine
@@ -57,10 +52,9 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
         sa = c->local_sockaddr;
 
         switch (sa->sa_family) {
-
 #if (NGX_HAVE_INET6)
         case AF_INET6:
-            sin6 = (struct sockaddr_in6 *) sa;
+            sin6 = (struct sockaddr_in6 *)sa;
 
             addr6 = port->addrs;
 
@@ -81,7 +75,7 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
             unix_socket = 1;
 
         default: /* AF_INET */
-            sin = (struct sockaddr_in *) sa;
+            sin = (struct sockaddr_in *)sa;
 
             addr = port->addrs;
 
@@ -100,10 +94,9 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
 
     } else {
         switch (c->local_sockaddr->sa_family) {
-
 #if (NGX_HAVE_INET6)
         case AF_INET6:
-            addr6 = port->addrs;
+            addr6     = port->addrs;
             addr_conf = &addr6[0].conf;
             break;
 #endif
@@ -112,7 +105,7 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
             unix_socket = 1;
 
         default: /* AF_INET */
-            addr = port->addrs;
+            addr      = port->addrs;
             addr_conf = &addr[0].conf;
             break;
         }
@@ -139,29 +132,30 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
     }
 }
 
-
-ngx_rtmp_session_t *
-ngx_rtmp_init_session(ngx_connection_t *c, ngx_rtmp_addr_conf_t *addr_conf)
+ngx_rtmp_session_t *ngx_rtmp_init_session(ngx_connection_t *c,
+                                          ngx_rtmp_addr_conf_t *addr_conf)
 {
-    ngx_rtmp_session_t             *s;
-    ngx_rtmp_core_srv_conf_t       *cscf;
-    ngx_rtmp_error_log_ctx_t       *ctx;
+    ngx_rtmp_session_t *s;
+    ngx_rtmp_core_srv_conf_t *cscf;
+    ngx_rtmp_error_log_ctx_t *ctx;
 
-    s = ngx_pcalloc(c->pool, sizeof(ngx_rtmp_session_t) +
-            sizeof(ngx_chain_t *) * ((ngx_rtmp_core_srv_conf_t *)
-                addr_conf->ctx-> srv_conf[ngx_rtmp_core_module
-                    .ctx_index])->out_queue);
+    s = ngx_pcalloc(c->pool,
+                    sizeof(ngx_rtmp_session_t) +
+                        sizeof(ngx_chain_t *) *
+                            ((ngx_rtmp_core_srv_conf_t *)addr_conf->ctx
+                                 ->srv_conf[ngx_rtmp_core_module.ctx_index])
+                                ->out_queue);
     if (s == NULL) {
         ngx_rtmp_close_connection(c);
         return NULL;
     }
 
     s->main_conf = addr_conf->ctx->main_conf;
-    s->srv_conf = addr_conf->ctx->srv_conf;
+    s->srv_conf  = addr_conf->ctx->srv_conf;
 
     s->addr_text = &addr_conf->addr_text;
 
-    c->data = s;
+    c->data       = s;
     s->connection = c;
 
     ctx = ngx_palloc(c->pool, sizeof(ngx_rtmp_error_log_ctx_t));
@@ -170,13 +164,13 @@ ngx_rtmp_init_session(ngx_connection_t *c, ngx_rtmp_addr_conf_t *addr_conf)
         return NULL;
     }
 
-    ctx->client = &c->addr_text;
+    ctx->client  = &c->addr_text;
     ctx->session = s;
 
     c->log->connection = c->number;
-    c->log->handler = ngx_rtmp_log_error;
-    c->log->data = ctx;
-    c->log->action = NULL;
+    c->log->handler    = ngx_rtmp_log_error;
+    c->log->data       = ctx;
+    c->log->action     = NULL;
 
     c->log_error = NGX_ERROR_INFO;
 
@@ -189,9 +183,9 @@ ngx_rtmp_init_session(ngx_connection_t *c, ngx_rtmp_addr_conf_t *addr_conf)
     cscf = ngx_rtmp_get_module_srv_conf(s, ngx_rtmp_core_module);
 
     s->out_queue = cscf->out_queue;
-    s->out_cork = cscf->out_cork;
-    s->in_streams = ngx_pcalloc(c->pool, sizeof(ngx_rtmp_stream_t)
-            * cscf->max_streams);
+    s->out_cork  = cscf->out_cork;
+    s->in_streams =
+        ngx_pcalloc(c->pool, sizeof(ngx_rtmp_stream_t) * cscf->max_streams);
     if (s->in_streams == NULL) {
         ngx_rtmp_close_connection(c);
         return NULL;
@@ -201,11 +195,10 @@ ngx_rtmp_init_session(ngx_connection_t *c, ngx_rtmp_addr_conf_t *addr_conf)
     ngx_queue_init(&s->posted_dry_events);
 #endif
 
-    s->epoch = ngx_current_msec;
+    s->epoch   = ngx_current_msec;
     s->timeout = cscf->timeout;
-    s->buflen = cscf->buflen;
+    s->buflen  = cscf->buflen;
     ngx_rtmp_set_chunk_size(s, NGX_RTMP_DEFAULT_CHUNK_SIZE);
-
 
     if (ngx_rtmp_fire_event(s, NGX_RTMP_CONNECT, NULL, NULL) != NGX_OK) {
         ngx_rtmp_finalize_session(s);
@@ -215,13 +208,11 @@ ngx_rtmp_init_session(ngx_connection_t *c, ngx_rtmp_addr_conf_t *addr_conf)
     return s;
 }
 
-
-static u_char *
-ngx_rtmp_log_error(ngx_log_t *log, u_char *buf, size_t len)
+static u_char *ngx_rtmp_log_error(ngx_log_t *log, u_char *buf, size_t len)
 {
-    u_char                     *p;
-    ngx_rtmp_session_t         *s;
-    ngx_rtmp_error_log_ctx_t   *ctx;
+    u_char *p;
+    ngx_rtmp_session_t *s;
+    ngx_rtmp_error_log_ctx_t *ctx;
 
     if (log->action) {
         p = ngx_snprintf(buf, len, " while %s", log->action);
@@ -248,16 +239,14 @@ ngx_rtmp_log_error(ngx_log_t *log, u_char *buf, size_t len)
     return p;
 }
 
-
-static void
-ngx_rtmp_close_connection(ngx_connection_t *c)
+static void ngx_rtmp_close_connection(ngx_connection_t *c)
 {
-    ngx_pool_t                         *pool;
+    ngx_pool_t *pool;
 
     ngx_log_debug0(NGX_LOG_DEBUG_RTMP, c->log, 0, "close connection");
 
 #if (NGX_STAT_STUB)
-    (void) ngx_atomic_fetch_add(ngx_stat_active, -1);
+    (void)ngx_atomic_fetch_add(ngx_stat_active, -1);
 #endif
 
     pool = c->pool;
@@ -265,13 +254,11 @@ ngx_rtmp_close_connection(ngx_connection_t *c)
     ngx_destroy_pool(pool);
 }
 
-
-static void
-ngx_rtmp_close_session_handler(ngx_event_t *e)
+static void ngx_rtmp_close_session_handler(ngx_event_t *e)
 {
-    ngx_rtmp_session_t                 *s;
-    ngx_connection_t                   *c;
-    ngx_rtmp_core_srv_conf_t           *cscf;
+    ngx_rtmp_session_t *s;
+    ngx_connection_t *c;
+    ngx_rtmp_core_srv_conf_t *cscf;
 
     s = e->data;
     c = s->connection;
@@ -304,12 +291,10 @@ ngx_rtmp_close_session_handler(ngx_event_t *e)
     ngx_rtmp_close_connection(c);
 }
 
-
-void
-ngx_rtmp_finalize_session(ngx_rtmp_session_t *s)
+void ngx_rtmp_finalize_session(ngx_rtmp_session_t *s)
 {
-    ngx_event_t        *e;
-    ngx_connection_t   *c;
+    ngx_event_t *e;
+    ngx_connection_t *c;
 
     c = s->connection;
     if (c->destroyed) {
@@ -319,11 +304,10 @@ ngx_rtmp_finalize_session(ngx_rtmp_session_t *s)
     ngx_log_debug0(NGX_LOG_DEBUG_RTMP, c->log, 0, "finalize session");
 
     c->destroyed = 1;
-    e = &s->close;
-    e->data = s;
-    e->handler = ngx_rtmp_close_session_handler;
-    e->log = c->log;
+    e            = &s->close;
+    e->data      = s;
+    e->handler   = ngx_rtmp_close_session_handler;
+    e->log       = c->log;
 
     ngx_post_event(e, &ngx_posted_events);
 }
-

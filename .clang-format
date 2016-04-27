@@ -1,0 +1,9 @@
+BasedOnStyle: "LLVM"
+Language: Cpp
+BreakBeforeBraces: Linux
+AllowShortFunctionsOnASingleLine: None
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: false
+ColumnLimit: 80
+IndentWidth: 4
+UseTab: Never

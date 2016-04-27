@@ -3,25 +3,21 @@
  * Copyright (C) Roman Arutyunyan
  */
 
-
+#include "ngx_rtmp_proxy_protocol.h"
+#include <nginx.h>
 #include <ngx_config.h>
 #include <ngx_core.h>
-#include <nginx.h>
-#include "ngx_rtmp_proxy_protocol.h"
-
 
 static void ngx_rtmp_proxy_protocol_recv(ngx_event_t *rev);
 
-
-void
-ngx_rtmp_proxy_protocol(ngx_rtmp_session_t *s)
+void ngx_rtmp_proxy_protocol(ngx_rtmp_session_t *s)
 {
-    ngx_event_t       *rev;
-    ngx_connection_t  *c;
+    ngx_event_t *rev;
+    ngx_connection_t *c;
 
-    c = s->connection;
-    rev = c->read;
-    rev->handler =  ngx_rtmp_proxy_protocol_recv;
+    c            = s->connection;
+    rev          = c->read;
+    rev->handler = ngx_rtmp_proxy_protocol_recv;
 
     ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "proxy_protocol: start");
@@ -46,18 +42,16 @@ ngx_rtmp_proxy_protocol(ngx_rtmp_session_t *s)
     }
 }
 
-
-static void
-ngx_rtmp_proxy_protocol_recv(ngx_event_t *rev)
+static void ngx_rtmp_proxy_protocol_recv(ngx_event_t *rev)
 {
-    u_char               buf[107], *p, *pp, *text;
-    size_t               len;
-    ssize_t              n;
-    ngx_err_t            err;
-    ngx_int_t            i;
-    ngx_addr_t           addr;
-    ngx_connection_t    *c;
-    ngx_rtmp_session_t  *s;
+    u_char buf[107], *p, *pp, *text;
+    size_t len;
+    ssize_t n;
+    ngx_err_t err;
+    ngx_int_t i;
+    ngx_addr_t addr;
+    ngx_connection_t *c;
+    ngx_rtmp_session_t *s;
 
     c = rev->data;
     s = c->data;
@@ -68,7 +62,7 @@ ngx_rtmp_proxy_protocol_recv(ngx_event_t *rev)
 
     if (rev->timedout) {
         ngx_log_error(NGX_LOG_INFO, c->log, NGX_ETIMEDOUT,
-                "proxy_protocol: recv: client timed out");
+                      "proxy_protocol: recv: client timed out");
         c->timedout = 1;
         ngx_rtmp_finalize_session(s);
         return;
@@ -78,14 +72,13 @@ ngx_rtmp_proxy_protocol_recv(ngx_event_t *rev)
         ngx_del_timer(rev);
     }
 
-    n = recv(c->fd, (char *) buf, sizeof(buf), MSG_PEEK);
+    n = recv(c->fd, (char *)buf, sizeof(buf), MSG_PEEK);
 
     err = ngx_socket_errno;
 
     ngx_log_debug1(NGX_LOG_DEBUG_RTMP, c->log, 0, "recv(): %d", n);
 
     if (n == -1) {
-
         if (err == NGX_EAGAIN) {
             ngx_add_timer(rev, s->timeout);
 
@@ -118,9 +111,8 @@ ngx_rtmp_proxy_protocol_recv(ngx_event_t *rev)
         goto skip;
     }
 
-    if (n < 5 || ngx_strncmp(p, "TCP", 3) != 0
-        || (p[3] != '4' && p[3] != '6') || p[4] != ' ')
-    {
+    if (n < 5 || ngx_strncmp(p, "TCP", 3) != 0 ||
+        (p[3] != '4' && p[3] != '6') || p[4] != ' ') {
         goto bad_header;
     }
 
@@ -174,10 +166,10 @@ skip:
             goto failed;
         }
 
-        c->sockaddr = addr.sockaddr;
-        c->socklen = addr.socklen;
+        c->sockaddr       = addr.sockaddr;
+        c->socklen        = addr.socklen;
         c->addr_text.data = text;
-        c->addr_text.len = len;
+        c->addr_text.len  = len;
 
         ngx_log_debug1(NGX_LOG_DEBUG_RTMP, c->log, 0,
                        "proxy_protocol: remote_addr:'%V'", &c->addr_text);
