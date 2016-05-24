@@ -110,6 +110,8 @@ Table of Contents
     * [dash_playlist_length](#dash_playlist_length)
     * [dash_nested](#dash_nested)
     * [dash_cleanup](#dash_cleanup)
+    * [dash_clock_compensation](#dash_clock_compensation)
+    * [dash_clock_helper_uri](#dash_clock_helper_uri)
 * [Access log](#access-log)
     * [access_log](#access_log)
     * [log_format](#log_format)
@@ -1603,6 +1605,45 @@ MPEG-DASH fragments and manifests from MPEG-DASH directory.
 Init fragments are deleted after stream manifest is deleted.
 ```sh
 dash_cleanup off;
+```
+
+#### dash\_clock_compensation
+Syntax: `dash_clock_compensation off|ntp|http_head|http_iso`  
+Context: rtmp, server, application  
+Default: off
+
+Toggles MPEG-DASH clock compentation element output into MPD.
+In this mode nginx provides `UTCTiming` element for MPEG-DASH manifest.
+Clock compensation provided by DASH-client if possible.
+- ntp - use NTP protocol
+- http_head - client must fetch header `Date` from URI (`dash_clock_helper_uri`)
+- http_iso - client must fetch date in ISO format from URI (`dash_clock_helper_uri`)
+
+Standard section: 4.7.2. Service Provider Requirements and Guidelines
+
+```sh
+dash\_clock_compensation off;
+```
+
+#### dash\_clock_helper_uri
+Syntax: `dash_clock_helper_uri URI`  
+Context: rtmp, server, application  
+Default: none
+
+URI helper resource for clock compensation for client.
+Clock compensation type:
+- ntp - address of NTP-server
+- http\_head - full HTTP uri
+- http\_iso - full HTTP uri
+
+Standard section: 4.7.2. Service Provider Requirements and Guidelines
+
+```sh
+dash\_clock\_helper_uri http://rtmp-server/static/time.txt;
+
+_or_
+
+dash\_clock\_helper_uri http://rtmp-server/lua/time-iso;
 ```
 
 ## Access log
