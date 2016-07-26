@@ -45,7 +45,7 @@ static ngx_command_t  ngx_rtmp_core_commands[] = {
       NULL },
 
     { ngx_string("listen"),
-      NGX_RTMP_SRV_CONF|NGX_CONF_TAKE12,
+      NGX_RTMP_SRV_CONF|NGX_CONF_1MORE,
       ngx_rtmp_core_listen,
       NGX_RTMP_SRV_CONF_OFFSET,
       0,
