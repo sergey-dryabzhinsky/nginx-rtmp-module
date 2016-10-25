@@ -30,7 +30,7 @@ static ngx_int_t ngx_rtmp_hls_ensure_directory(ngx_rtmp_session_t *s,
        ngx_str_t *path);
 
 
-#define NGX_RTMP_HLS_BUFSIZE            (1024*1024)
+#define NGX_RTMP_HLS_BUFSIZE            (64*1024*1024)
 #define NGX_RTMP_HLS_DIR_ACCESS         0744
 
 
@@ -296,7 +296,7 @@ static ngx_command_t ngx_rtmp_hls_commands[] = {
       ngx_conf_set_enum_slot,
       NGX_RTMP_APP_CONF_OFFSET,
       offsetof(ngx_rtmp_hls_app_conf_t, allow_client_cache),
-      &ngx_rtmp_hls_cache },       
+      &ngx_rtmp_hls_cache },
 
     { ngx_string("hls_variant"),
       NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_1MORE,
