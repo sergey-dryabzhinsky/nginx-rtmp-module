@@ -2366,7 +2366,11 @@ ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
 }
 
 
+#if (nginx_version >= 1011005)
+static ngx_msec_t
+#else
 static time_t
+#endif
 ngx_rtmp_hls_cleanup(void *data)
 {
     ngx_rtmp_hls_cleanup_t *cleanup = data;
