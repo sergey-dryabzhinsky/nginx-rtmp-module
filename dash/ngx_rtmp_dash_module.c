@@ -277,7 +277,7 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
     "    xmlns:xsi=\"http://www.w3.org/2011/XMLSchema-instance\"\n"            \
     "    xsi:schemaLocation=\"urn:mpeg:DASH:schema:MPD:2011 DASH-MPD.xsd\">\n" \
     "  <UTCTiming schemeIdUri=\"urn:mpeg:dash:utc:http-head:2014\"\n"          \
-    "       value=\"http://vm2.dashif.org/dash/time.txt\" />"                  \
+    "       value=\"https://vm2.dashif.org/dash/time.txt\" />"                 \
     "  <Period start=\"PT0S\" id=\"dash\">\n"
 
 
@@ -1487,7 +1487,11 @@ ngx_rtmp_dash_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
 }
 
 
+#if (nginx_version >= 1011005)
+static ngx_msec_t
+#else
 static time_t
+#endif
 ngx_rtmp_dash_cleanup(void *data)
 {
     ngx_rtmp_dash_cleanup_t *cleanup = data;
