@@ -685,6 +685,45 @@ write_err:
     return NGX_ERROR;
 }
 
+static ngx_int_t
+ngx_rtmp_hls_update_endlist(ngx_rtmp_session_t *s)
+{
+    int                             fd;
+    ssize_t                         rc;
+    ngx_rtmp_hls_ctx_t             *ctx;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                   "hls: update stream ENDLIST");
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
+
+    fd = ngx_open_file(ctx->playlist.data, NGX_FILE_WRONLY,
+                       NGX_FILE_APPEND, NGX_FILE_DEFAULT_ACCESS);
+
+    if (fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "hls: " ngx_open_file_n " failed: '%V'",
+                      &ctx->var_playlist_bak);
+
+        return NGX_ERROR;
+    }
+
+#define NGX_RTMP_HLS_ENDLIST_HEADER "#EXT-X-ENDLIST\n"
+
+    rc = ngx_write_fd(fd, NGX_RTMP_HLS_ENDLIST_HEADER,
+                      sizeof(NGX_RTMP_HLS_ENDLIST_HEADER) - 1);
+    if (rc < 0) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "hls: " ngx_write_fd_n " failed: '%V'",
+                      &ctx->var_playlist_bak);
+        ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    ngx_close_file(fd);
+
+    return 0;
+}
 
 static ngx_int_t
 ngx_rtmp_hls_copy(ngx_rtmp_session_t *s, void *dst, u_char **src, size_t n,
@@ -1620,6 +1659,7 @@ ngx_rtmp_hls_close_stream(ngx_rtmp_session_t *s, ngx_rtmp_close_stream_t *v)
                    "hls: close stream");
 
     ngx_rtmp_hls_close_fragment(s);
+    ngx_rtmp_hls_update_endlist(s);
 
 next:
     return next_close_stream(s, v);
