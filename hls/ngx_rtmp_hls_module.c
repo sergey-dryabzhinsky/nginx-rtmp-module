@@ -81,6 +81,7 @@ typedef struct {
     uint64_t                            aframe_pts;
 
     ngx_rtmp_hls_variant_t             *var;
+    u_char                              closed;
 } ngx_rtmp_hls_ctx_t;
 
 
@@ -1660,6 +1661,11 @@ ngx_rtmp_hls_close_stream(ngx_rtmp_session_t *s, ngx_rtmp_close_stream_t *v)
 
     ngx_rtmp_hls_close_fragment(s);
     ngx_rtmp_hls_update_endlist(s);
+
+    if (ctx->closed == 0)
+        ngx_rtmp_hls_update_endlist(s);
+
+    ctx->closed = 1;
 
 next:
     return next_close_stream(s, v);
