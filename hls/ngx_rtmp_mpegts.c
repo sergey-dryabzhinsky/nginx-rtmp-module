@@ -14,17 +14,22 @@ static u_char ngx_rtmp_mpegts_header[] = {
 
         /* https://en.wikipedia.org/wiki/MPEG_transport_stream#Packet */
 
-    /* TS */
+    /* TS Header */
     0x47,                                               // Sync byte
     0x40, 0x00,                                         // TEI(1) + PUS(1) + TP(1) + PID(13)
-    0x10,                                               // SC(2) + AFF(1) + PF(1) + CC(4)
-    0x00,
-    /* PSI */
-    0x00, 0xb0, 0x0d, 0x00, 0x01, 0xc1, 0x00, 0x00,
+    0x10,                                               // TSC(2) + AFF(1) + PF(1) + CC(4)
+    0x00,                                               // adaption_field_length(8)
+    
     /* PAT */
-    0x00, 0x01, 0xef, 0xff,
-    /* CRC */
-    0x36, 0x90, 0xe2, 0x3d,
+    0x00,                                               // table_id(8)
+    0xb0, 0x0d,                                         // 1011b(4) + section_length(12)
+    0x00, 0x01,                                         // transport_stream_id(16)
+    0xc1, 0x00, 0x00,                                   // 11b(2) + VN(5) + CNI(1), section_no(8), last_section_no(8)
+    /* PAT program loop */
+    0x00, 0x01, 0xef, 0xff,                             // program_number(16), reserved(3) + program_map_pid(13)
+    /* PAT crc (CRC-32-MPEG2) */
+    0x36, 0x90, 0xe2, 0x3d,                             // !!! Needs to be recalculated each time any bit in PAT is modified !!!
+
     /* stuffing 167 bytes */
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -44,19 +49,30 @@ static u_char ngx_rtmp_mpegts_header[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 
-    /* TS */
-    0x47,
-    0x4f, 0xff,
-    0x10,
-    0x00,
-    /* PSI */
-    0x02, 0xb0, 0x17, 0x00, 0x01, 0xc1, 0x00, 0x00,
+    /* TS Header */
+    0x47,                                               // Sync byte
+    0x4f, 0xff,                                         // TEI(1) + PUS(1) + TP(1) + PID(13)
+    0x10,                                               // TSC(2) + AFF(1) + PF(1) + CC(4)
+    0x00,                                               // adaption_field_length(8)
+    
     /* PMT */
-    0xe1, 0x00,
-    0xf0, 0x00,
-    0x1b, 0xe1, 0x00, 0xf0, 0x00, /* h264 */
-    0x00, 0x00, 0x00, 0x00, 0x00, /* audio placeholder */
-    0x00, 0x00, 0x00, 0x00, /* audio crc placeholder */
+    0x02,                                               // table_id(8)
+    0xb0, 0x17,                                         // 1011b(4) + section_length(12)
+    0x00, 0x01,                                         // program_number(16)
+    0xc1, 0x00, 0x00,                                   // 11b(2) + VN(5) + CNI(1), section_no(8), last_section_no(8)
+    0xe1, 0x00,                                         // reserved(3) + PCR_PID(13)
+    0xf0, 0x00,                                         // reserved(4) + program_info_length(12)
+    /* PMT component loop */
+    // 1st component: H.264 Video, PID 0x100
+    0x1b,                                               // stream_type(8)
+    0xe1, 0x00,                                         // reserved(3) + elementary_PID(13)
+    0xf0, 0x00,                                         // reserved(4) + ES_info_length(12)
+    // 2nd component: ADTS AAC Audio, PID 0x101
+    0x0f,                                               // stream_type(8)
+    0xe1, 0x01,                                         // reserved(3) + elementary_PID(13)
+    0xf0, 0x00,                                         // reserved(4) + ES_info_length(12)
+    /* PMT crc (CRC-32-MPEG2) */
+    0x2f, 0x44, 0xb9, 0x9b,                             // !!! Needs to be recalculated each time any bit in PMT is modified !!!
 
     /* stuffing 157 bytes */
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -79,14 +95,14 @@ static u_char ngx_rtmp_mpegts_header[] = {
 
 static u_char ngx_rtmp_mpegts_header_mp3[] = {
     0x03, 0xe1, 0x01, 0xf0, 0x00, /* mp3 */
-    /* CRC */
-    0x4e, 0x59, 0x3d, 0x1e, /* crc for mp3 */
+    /* CRC (of whole PMT)!!! */
+    0x4e, 0x59, 0x3d, 0x1e, /* precalculated crc for pmt with mp3 audio */
 };
 
 static u_char ngx_rtmp_mpegts_header_aac[] = {
     0x0f, 0xe1, 0x01, 0xf0, 0x00, /* aac */
-    /* CRC */
-    0x2f, 0x44, 0xb9, 0x9b, /* crc for aac */
+    /* CRC (of whole PMT)!!! */
+    0x2f, 0x44, 0xb9, 0x9b, /* precalculated crc for pmt with aac audio */
 };
 
 /* 700 ms PCR delay */
