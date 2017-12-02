@@ -76,7 +76,8 @@ ngx_rtmp_init_connection(ngx_connection_t *c)
 
             break;
 #endif
-
+                
+        /* fall through */
         case AF_UNIX:
             unix_socket = 1;
 
