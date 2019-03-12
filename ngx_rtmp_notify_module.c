@@ -757,6 +757,9 @@ ngx_rtmp_notify_done_create(ngx_rtmp_session_t *s, void *arg,
     b->last = ngx_cpymem(b->last, (u_char*) "&bytes_out=", sizeof("&bytes_out=") -1);
     b->last = ngx_sprintf(b->last, "%ui", (ngx_uint_t) s->out_bytes);
 
+    b->last = ngx_cpymem(b->last, (u_char *) "&time=", sizeof("&time=") - 1);
+    b->last = ngx_sprintf(b->last, "%T", ngx_cached_time->sec - ctx->start);
+
     *b->last++ = '&';
 
     return ngx_rtmp_notify_create_request(s, pool, ds->url_idx, pl);
@@ -1964,9 +1967,9 @@ ngx_rtmp_notify_record_started(ngx_rtmp_session_t *s, ngx_rtmp_record_started_t 
     ci.arg    = v;
 
     ngx_rtmp_netcall_create(s, &ci);
-    
+
 next:
-    return next_record_started(s, v); 
+    return next_record_started(s, v);
 }
 
 
