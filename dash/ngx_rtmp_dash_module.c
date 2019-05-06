@@ -6,6 +6,8 @@
 #include <ngx_rtmp_codec_module.h>
 #include "ngx_rtmp_live_module.h"
 #include "ngx_rtmp_mp4.h"
+#include "ngx_rtmp_dash_templates.h"
+#include "ngx_rtmp_cenc.h"
 
 
 static ngx_rtmp_publish_pt              next_publish;
@@ -15,11 +17,14 @@ static ngx_rtmp_stream_eof_pt           next_stream_eof;
 static ngx_rtmp_playlist_pt             next_playlist;
 
 
+static char * ngx_rtmp_dash_variant(ngx_conf_t *cf, ngx_command_t *cmd,
+       void *conf);
 static ngx_int_t ngx_rtmp_dash_postconfiguration(ngx_conf_t *cf);
 static void * ngx_rtmp_dash_create_app_conf(ngx_conf_t *cf);
 static char * ngx_rtmp_dash_merge_app_conf(ngx_conf_t *cf,
        void *parent, void *child);
-static ngx_int_t ngx_rtmp_dash_write_init_segments(ngx_rtmp_session_t *s);
+static ngx_int_t ngx_rtmp_dash_write_init_segments(ngx_rtmp_session_t *s,
+       ngx_rtmp_cenc_drm_info_t *drmi);
 static ngx_int_t ngx_rtmp_dash_ensure_directory(ngx_rtmp_session_t *s);
 
 
@@ -46,14 +51,28 @@ typedef struct {
     char                                type;
     uint32_t                            earliest_pres_time;
     uint32_t                            latest_pres_time;
+    unsigned                            is_protected:1; 
+    u_char                              key[NGX_RTMP_CENC_KEY_SIZE];
+    u_char                              iv[NGX_RTMP_CENC_IV_SIZE];
     ngx_rtmp_mp4_sample_t               samples[NGX_RTMP_DASH_MAX_SAMPLES];
 } ngx_rtmp_dash_track_t;
 
 
 typedef struct {
+    ngx_str_t                           suffix;
+    ngx_array_t                         args;
+} ngx_rtmp_dash_variant_t;
+
+
+typedef struct {
+    ngx_str_t                           segments;
+    ngx_str_t                           segments_bak;
     ngx_str_t                           playlist;
     ngx_str_t                           playlist_bak;
+    ngx_str_t                           var_playlist;
+    ngx_str_t                           var_playlist_bak;
     ngx_str_t                           name;
+    ngx_str_t                           varname;
     ngx_str_t                           stream;
     ngx_time_t                          start_time;
 
@@ -64,6 +83,13 @@ typedef struct {
     unsigned                            opened:1;
     unsigned                            has_video:1;
     unsigned                            has_audio:1;
+    unsigned                            start_cuepoint:1;
+    unsigned                            end_cuepoint:1;
+
+    uint32_t                            cuepoint_starttime;
+    uint32_t                            cuepoint_endtime;
+    uint32_t                            cuepoint_duration;
+    uint32_t                            cuepoint_id;
 
     ngx_file_t                          video_file;
     ngx_file_t                          audio_file;
@@ -72,6 +98,10 @@ typedef struct {
 
     ngx_rtmp_dash_track_t               audio;
     ngx_rtmp_dash_track_t               video;
+    ngx_rtmp_dash_variant_t            *var;
+
+    ngx_rtmp_cenc_drm_info_t            drm_info;
+
 } ngx_rtmp_dash_ctx_t;
 
 
@@ -94,11 +124,32 @@ static ngx_conf_enum_t                  ngx_rtmp_dash_clock_compensation_type_sl
     { ngx_null_string,                  0 }
 };
 
+#define NGX_RTMP_DASH_AD_MARKERS_OFF                1
+#define NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT        2
+#define NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT_SCTE35 3
+
+static ngx_conf_enum_t                   ngx_rtmp_dash_ad_markers_type_slots[] = {
+    { ngx_string("off"),                 NGX_RTMP_DASH_AD_MARKERS_OFF },
+    { ngx_string("on_cuepoint"),         NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT },
+    { ngx_string("on_cuepoint_scte35"),  NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT_SCTE35 },
+    { ngx_null_string,                   0 }
+};
+
 typedef struct {
     ngx_flag_t                          dash;
     ngx_msec_t                          fraglen;
     ngx_msec_t                          playlen;
     ngx_flag_t                          nested;
+    ngx_flag_t                          cenc;
+    ngx_str_t                           cenc_key;
+    ngx_str_t                           cenc_kid;
+    ngx_flag_t                          wdv;
+    ngx_str_t                           wdv_data;
+    ngx_flag_t                          mspr;
+    ngx_str_t                           mspr_data;
+    ngx_str_t                           mspr_kid;
+    ngx_str_t                           mspr_pro;
+    ngx_flag_t                          repetition;
     ngx_uint_t                          clock_compensation;     // Try to compensate clock drift
                                                                 //  between client and server (on client side)
     ngx_str_t                           clock_helper_uri;       // Use uri to static file on HTTP server
@@ -108,6 +159,8 @@ typedef struct {
     ngx_uint_t                          winfrags;
     ngx_flag_t                          cleanup;
     ngx_path_t                         *slot;
+    ngx_array_t                        *variant;
+    ngx_uint_t                          ad_markers;
 } ngx_rtmp_dash_app_conf_t;
 
 
@@ -155,6 +208,76 @@ static ngx_command_t ngx_rtmp_dash_commands[] = {
       offsetof(ngx_rtmp_dash_app_conf_t, nested),
       NULL },
 
+    { ngx_string("dash_repetition"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, repetition),
+      NULL },
+
+    { ngx_string("dash_cenc"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, cenc),
+      NULL },
+
+    { ngx_string("dash_cenc_key"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, cenc_key),
+      NULL },
+
+    { ngx_string("dash_cenc_kid"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, cenc_kid),
+      NULL },
+
+    { ngx_string("dash_wdv"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, wdv),
+      NULL },
+
+    { ngx_string("dash_wdv_data"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, wdv_data),
+      NULL },
+
+    { ngx_string("dash_mspr"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, mspr),
+      NULL },
+
+    { ngx_string("dash_mspr_data"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, mspr_data),
+      NULL },
+
+    { ngx_string("dash_mspr_kid"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, mspr_kid),
+      NULL },
+
+    { ngx_string("dash_mspr_pro"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, mspr_pro),
+      NULL },
+
     { ngx_string("dash_clock_compensation"),
       NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_enum_slot,
@@ -168,6 +291,20 @@ static ngx_command_t ngx_rtmp_dash_commands[] = {
       NGX_RTMP_APP_CONF_OFFSET,
       offsetof(ngx_rtmp_dash_app_conf_t, clock_helper_uri),
       NULL },
+
+    { ngx_string("dash_variant"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_1MORE,
+      ngx_rtmp_dash_variant,
+      NGX_RTMP_APP_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("dash_ad_markers"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_enum_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_dash_app_conf_t, ad_markers),
+      &ngx_rtmp_dash_ad_markers_type_slots },
 
     ngx_null_command
 };
@@ -263,33 +400,124 @@ ngx_rtmp_dash_gcd(ngx_uint_t m, ngx_uint_t n)
 }
 
 
+static u_char *
+ngx_rtmp_dash_write_segment(u_char *p, u_char *last, ngx_uint_t t,
+    ngx_uint_t d, ngx_uint_t r)
+{
+    if (r == 0) {
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_TIME, t, d);
+    } else {
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_TIME_WITH_REPETITION, t, d, r);
+    }
+
+    return p;
+}
+
+
+static u_char *
+ngx_rtmp_dash_write_segment_timeline(ngx_rtmp_session_t *s, ngx_rtmp_dash_ctx_t *ctx, 
+    ngx_rtmp_dash_app_conf_t *dacf, u_char *p, u_char *last)
+{
+    ngx_uint_t              i, t, d, r;
+    ngx_rtmp_dash_frag_t    *f;
+
+    for (i = 0; i < ctx->nfrags; i++) {
+        f = ngx_rtmp_dash_get_frag(s, i);
+
+        if (dacf->repetition) {
+            if (i == 0) {
+                t = f->timestamp;
+                d = f->duration;
+                r = 0;
+            } else {
+                if (f->duration == d) {
+                    r++;
+                } else {
+                    p = ngx_rtmp_dash_write_segment(p, last, t, d, r);
+                    t = f->timestamp;
+                    d = f->duration;
+                    r = 0;
+                }
+            }
+            if (i == ctx->nfrags - 1) {
+                p = ngx_rtmp_dash_write_segment(p, last, t, d, r);
+            }
+        } else {
+            t = f->timestamp;
+            d = f->duration;
+            p = ngx_rtmp_dash_write_segment(p, last, t, d, 0);
+        }
+    }
+
+    return p;
+}
+
+
+static u_char *
+ngx_rtmp_dash_write_content_protection(ngx_rtmp_session_t *s,
+    ngx_rtmp_cenc_drm_info_t *drmi, u_char *p, u_char *last)
+{
+    u_char     *k;
+    ngx_str_t   cenc_pssh;
+
+    k = drmi->kid; 
+
+    ngx_rtmp_cenc_content_protection_pssh(k, &cenc_pssh);
+
+    p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_CONTENT_PROTECTION_CENC,
+        k[0], k[1], k[2], k[3],
+        k[4], k[5], k[6], k[7],
+        k[8], k[9], k[10], k[11], k[12], k[13], k[14], k[15]);
+
+
+    p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_CONTENT_PROTECTION_PSSH_CENC,
+        &cenc_pssh);
+
+    if (drmi->wdv) {
+         p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_CONTENT_PROTECTION_PSSH_WDV,
+             &drmi->wdv_data);
+    }
+
+    if (drmi->mspr) {
+         p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_CONTENT_PROTECTION_PSSH_MSPR,
+             &drmi->mspr_data,
+             &drmi->mspr_kid,
+	     &drmi->mspr_pro);
+    }
+
+    return p;
+}
+
+
 static ngx_int_t
-ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
+ngx_rtmp_dash_write_variant_playlist(ngx_rtmp_session_t *s)
 {
     char                      *sep;
     u_char                    *p, *last;
     ssize_t                    n;
-    ngx_fd_t                   fd;
+    ngx_fd_t                   fd, fds;
     struct tm                  tm;
-    ngx_str_t                  noname, *name;
-    ngx_uint_t                 i, frame_rate_num, frame_rate_denom;
+    ngx_uint_t                 i, j, k, frame_rate_num, frame_rate_denom;
     ngx_uint_t                 depth_msec, depth_sec;
     ngx_uint_t                 update_period, update_period_msec;
-    ngx_uint_t                 buffer_time, buffer_time_msec;
+    ngx_uint_t                 start_time, buffer_time, buffer_time_msec;
     ngx_uint_t                 presentation_delay, presentation_delay_msec;
     ngx_uint_t                 gcd, par_x, par_y;
     ngx_rtmp_dash_ctx_t       *ctx;
     ngx_rtmp_codec_ctx_t      *codec_ctx;
     ngx_rtmp_dash_frag_t      *f;
     ngx_rtmp_dash_app_conf_t  *dacf;
+    ngx_rtmp_dash_variant_t   *var;
+    ngx_str_t                 *arg;
 
     ngx_rtmp_playlist_t        v;
 
     static u_char              buffer[NGX_RTMP_DASH_BUFSIZE];
-    static u_char              avaliable_time[NGX_RTMP_DASH_GMT_LENGTH];
+    static u_char              available_time[NGX_RTMP_DASH_GMT_LENGTH];
     static u_char              publish_time[NGX_RTMP_DASH_GMT_LENGTH];
     static u_char              buffer_depth[sizeof("P00Y00M00DT00H00M00.000S")];
     static u_char              frame_rate[(NGX_INT_T_LEN * 2) + 2];
+    static u_char              seg_path[NGX_MAX_PATH + 1];
 
     dacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_dash_module);
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_dash_module);
@@ -299,133 +527,36 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
         return NGX_ERROR;
     }
 
-    if (ctx->id == 0) {
-        ngx_rtmp_dash_write_init_segments(s);
-    }
-
-    fd = ngx_open_file(ctx->playlist_bak.data, NGX_FILE_WRONLY,
+    fd = ngx_open_file(ctx->var_playlist_bak.data, NGX_FILE_WRONLY,
                        NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
 
     if (fd == NGX_INVALID_FILE) {
         ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
-                      "dash: open failed: '%V'", &ctx->playlist_bak);
+                      "dash: open failed: '%V'", &ctx->var_playlist_bak);
         return NGX_ERROR;
     }
 
+    /* availabity and publish time should be relative to peer epoch */
+    start_time = ctx->start_time.sec - (s->peer_epoch/1000);
+    ngx_log_debug4(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+            "Fixing start_time=%uD %uD epoch=%uD new_start_time=%uD",
+            (uint32_t)ctx->start_time.sec, (uint32_t)ctx->start_time.msec,
+            (uint32_t)s->peer_epoch,
+            (uint32_t)start_time);
 
-#define NGX_RTMP_DASH_MANIFEST_HEADER                                          \
-    "<?xml version=\"1.0\"?>\n"                                                \
-    "<MPD\n"                                                                   \
-    "    type=\"dynamic\"\n"                                                   \
-    "    xmlns=\"urn:mpeg:dash:schema:mpd:2011\"\n"                            \
-    "    availabilityStartTime=\"%s\"\n"                                       \
-    "    publishTime=\"%s\"\n"                                                 \
-    "    minimumUpdatePeriod=\"PT%ui.%03uiS\"\n"                               \
-    "    minBufferTime=\"PT%ui.%03uiS\"\n"                                     \
-    "    timeShiftBufferDepth=\"%s\"\n"                                        \
-    "    suggestedPresentationDelay=\"PT%ui.%03uiS\"\n"                        \
-    "    profiles=\"urn:hbbtv:dash:profile:isoff-live:2012,"                   \
-                   "urn:mpeg:dash:profile:isoff-live:2011\"\n"                 \
-    "    xmlns:xsi=\"http://www.w3.org/2011/XMLSchema-instance\"\n"            \
-    "    xsi:schemaLocation=\"urn:mpeg:DASH:schema:MPD:2011 DASH-MPD.xsd\">\n"
-
-#define NGX_RTMP_DASH_MANIFEST_PERIOD                                          \
-    "  <Period start=\"PT0S\" id=\"dash\">\n"
-
-
-#define NGX_RTMP_DASH_MANIFEST_VIDEO                                           \
-    "    <AdaptationSet\n"                                                     \
-    "        id=\"1\"\n"                                                       \
-    "        startWithSAP=\"1\"\n"                                             \
-    "        segmentAlignment=\"true\"\n"                                      \
-    "        maxWidth=\"%ui\"\n"                                               \
-    "        maxHeight=\"%ui\"\n"                                              \
-    "        maxFrameRate=\"%s\"\n"                                            \
-    "        par=\"%ui:%ui\">\n"                                               \
-    "      <Representation\n"                                                  \
-    "          id=\"%V_H264\"\n"                                               \
-    "          mimeType=\"video/mp4\"\n"                                       \
-    "          codecs=\"avc1.%02uxi%02uxi%02uxi\"\n"                           \
-    "          width=\"%ui\"\n"                                                \
-    "          height=\"%ui\"\n"                                               \
-    "          frameRate=\"%s\"\n"                                             \
-    "          sar=\"1:1\"\n"                                                  \
-    "          bandwidth=\"%ui\">\n"                                           \
-    "        <SegmentTemplate\n"                                               \
-    "            presentationTimeOffset=\"0\"\n"                               \
-    "            timescale=\"1000\"\n"                                         \
-    "            media=\"%V%s$Time$.m4v\"\n"                                   \
-    "            initialization=\"%V%sinit.m4v\">\n"                           \
-    "          <SegmentTimeline>\n"
-
-
-#define NGX_RTMP_DASH_MANIFEST_VIDEO_FOOTER                                    \
-    "          </SegmentTimeline>\n"                                           \
-    "        </SegmentTemplate>\n"                                             \
-    "      </Representation>\n"                                                \
-    "    </AdaptationSet>\n"
-
-
-#define NGX_RTMP_DASH_MANIFEST_TIME                                            \
-    "             <S t=\"%uD\" d=\"%uD\"/>\n"
-
-
-#define NGX_RTMP_DASH_MANIFEST_AUDIO                                           \
-    "    <AdaptationSet\n"                                                     \
-    "        id=\"2\"\n"                                                       \
-    "        startWithSAP=\"1\"\n"                                             \
-    "        segmentAlignment=\"true\">\n"                                     \
-    "      <AudioChannelConfiguration\n"                                       \
-    "          schemeIdUri=\"urn:mpeg:dash:"                                   \
-                                "23003:3:audio_channel_configuration:2011\"\n" \
-    "          value=\"1\"/>\n"                                                \
-    "      <Representation\n"                                                  \
-    "          id=\"%V_AAC\"\n"                                                \
-    "          mimeType=\"audio/mp4\"\n"                                       \
-    "          codecs=\"mp4a.%s\"\n"                                           \
-    "          audioSamplingRate=\"%ui\"\n"                                    \
-    "          bandwidth=\"%ui\">\n"                                           \
-    "        <SegmentTemplate\n"                                               \
-    "            presentationTimeOffset=\"0\"\n"                               \
-    "            timescale=\"1000\"\n"                                         \
-    "            media=\"%V%s$Time$.m4a\"\n"                                   \
-    "            initialization=\"%V%sinit.m4a\">\n"                           \
-    "          <SegmentTimeline>\n"
-
-
-#define NGX_RTMP_DASH_MANIFEST_AUDIO_FOOTER                                    \
-    "          </SegmentTimeline>\n"                                           \
-    "        </SegmentTemplate>\n"                                             \
-    "      </Representation>\n"                                                \
-    "    </AdaptationSet>\n"
-
-
-#define NGX_RTMP_DASH_PERIOD_FOOTER                                          \
-    "  </Period>\n"
-
-
-#define NGX_RTMP_DASH_MANIFEST_CLOCK                                           \
-    "  <UTCTiming schemeIdUri=\"urn:mpeg:dash:utc:%s:2014\"\n"                 \
-    "       value=\"%V\" />\n"
-
-
-#define NGX_RTMP_DASH_MANIFEST_FOOTER                                          \
-    "</MPD>\n"
-
-
-/**
- * Availability time must be equal stream start time
- * Cos segments time counting from it
- */
-    ngx_libc_gmtime(ctx->start_time.sec, &tm);
-    *ngx_sprintf(avaliable_time, "%4d-%02d-%02dT%02d:%02d:%02dZ",
+    /**
+     * Availability time must be equal stream start time
+     * Cos segments time counting from it
+     */
+    ngx_libc_gmtime(start_time, &tm);
+    *ngx_sprintf(available_time, "%4d-%02d-%02dT%02d:%02d:%02dZ",
              tm.tm_year + 1900, tm.tm_mon + 1,
              tm.tm_mday, tm.tm_hour,
              tm.tm_min, tm.tm_sec
              ) = 0;
 
     /* Stream publish time */
-    *ngx_sprintf(publish_time, "%s", avaliable_time) = 0;
+    *ngx_sprintf(publish_time, "%s", available_time) = 0;
 
     depth_sec = (ngx_uint_t) (
                  ngx_rtmp_dash_get_frag(s, ctx->nfrags - 1)->timestamp +
@@ -481,7 +612,347 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
     // Fill DASH header
     p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_HEADER,
                      // availabilityStartTime
-                     avaliable_time,
+                     available_time,
+                     // publishTime
+                     publish_time,
+                     // minimumUpdatePeriod
+                     update_period, update_period_msec,
+                     // minBufferTime
+                     buffer_time, buffer_time_msec,
+                     // timeShiftBufferDepth
+                     buffer_depth,
+                     // suggestedPresentationDelay
+                     presentation_delay, presentation_delay_msec
+                     );
+
+    p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_PERIOD);
+
+    n = ngx_write_fd(fd, buffer, p - buffer);
+
+    sep = (dacf->nested ? "/" : "-");
+    var = dacf->variant->elts;
+
+    if (ctx->has_video) {
+        frame_rate_num = (ngx_uint_t) (codec_ctx->frame_rate * 1000.);
+
+        if (frame_rate_num % 1000 == 0) {
+            *ngx_sprintf(frame_rate, "%ui", frame_rate_num / 1000) = 0;
+        } else {
+            frame_rate_denom = 1000;
+            switch (frame_rate_num) {
+                case 23976:
+                    frame_rate_num = 24000;
+                    frame_rate_denom = 1001;
+                    break;
+                case 29970:
+                    frame_rate_num = 30000;
+                    frame_rate_denom = 1001;
+                    break;
+                case 59940:
+                    frame_rate_num = 60000;
+                    frame_rate_denom = 1001;
+                    break;
+            }
+
+            *ngx_sprintf(frame_rate, "%ui/%ui", frame_rate_num, frame_rate_denom) = 0;
+        }
+
+        gcd = ngx_rtmp_dash_gcd(codec_ctx->width, codec_ctx->height);
+        par_x = codec_ctx->width / gcd;
+        par_y = codec_ctx->height / gcd;
+
+        p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_VIDEO,
+                         codec_ctx->width,
+                         codec_ctx->height,
+                         frame_rate,
+                         par_x, par_y);
+
+        switch (dacf->ad_markers) {
+            case NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT:
+            case NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT_SCTE35:
+                p = ngx_slprintf(p, last, NGX_RTMP_DASH_INBAND_EVENT);
+        }
+
+        if (dacf->cenc) {
+            p = ngx_rtmp_dash_write_content_protection(s, &ctx->drm_info, p, last);
+        }
+
+        n = ngx_write_fd(fd, buffer, p - buffer);
+
+        for (j = 0; j < dacf->variant->nelts; j++, var++) {
+
+            /* read segments file */
+            if (dacf->nested) {
+                *ngx_sprintf(seg_path, "%V/%V%V/index.seg",
+                             &dacf->path, &ctx->varname, &var->suffix) = 0;
+            } else {
+                *ngx_sprintf(seg_path, "%V/%V%V.seg",
+                             &dacf->path, &ctx->varname, &var->suffix) = 0;
+            }
+
+            ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                          "dash: read segments file for variant '%s'", seg_path);
+
+            fds = ngx_open_file(seg_path, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+
+            if (fds == NGX_INVALID_FILE) {
+                ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                              "dash: open failed: segments '%s'", seg_path);
+                continue;
+            } 
+
+            p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_VARIANT_VIDEO,
+                             &ctx->varname, &var->suffix,
+                             codec_ctx->avc_profile,
+                             codec_ctx->avc_compat,
+                             codec_ctx->avc_level);
+
+            arg = var->args.elts;
+            for (k = 0; k < var->args.nelts && k < 3 ; k++, arg++) {
+                p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_VARIANT_ARG, arg);
+            }
+
+            p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_VARIANT_ARG_FOOTER);
+
+            p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_SEGMENTTPL_VARIANT_VIDEO,
+                             &ctx->varname, &var->suffix, sep,
+                             &ctx->varname, &var->suffix, sep);
+
+            n = ngx_write_fd(fd, buffer, p - buffer);
+
+            while ((n = ngx_read_fd(fds, buffer, sizeof(buffer)))) {
+                n = ngx_write_fd(fd, buffer, n);
+            }
+
+            ngx_close_file(fds);
+
+            p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_VIDEO_FOOTER);
+            n = ngx_write_fd(fd, buffer, p - buffer);
+
+        }
+
+        p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_VIDEO_FOOTER);
+        n = ngx_write_fd(fd, buffer, p - buffer);
+    }
+
+    if (ctx->has_audio) {
+        p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_AUDIO);
+
+        if (dacf->cenc) {
+            p = ngx_rtmp_dash_write_content_protection(s, &ctx->drm_info, p, last);
+        }
+
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_AUDIO,
+                         &ctx->name,
+                         codec_ctx->audio_codec_id == NGX_RTMP_AUDIO_AAC ?
+                         (codec_ctx->aac_sbr ? "40.5" : "40.2") : "6b",
+                         codec_ctx->sample_rate,
+                         (ngx_uint_t) (codec_ctx->audio_data_rate * 1000),
+                         &ctx->name, sep,
+                         &ctx->name, sep);
+
+        p = ngx_rtmp_dash_write_segment_timeline(s, ctx, dacf, p, last);
+
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_AUDIO_FOOTER);
+
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_AUDIO_FOOTER);
+
+        n = ngx_write_fd(fd, buffer, p - buffer);
+    }
+
+    p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_PERIOD_FOOTER);
+    n = ngx_write_fd(fd, buffer, p - buffer);
+
+    /* UTCTiming value */
+    switch (dacf->clock_compensation) {
+        case NGX_RTMP_DASH_CLOCK_COMPENSATION_NTP:
+                p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_CLOCK,
+                                 "ntp",
+                                 &dacf->clock_helper_uri
+                );
+                n = ngx_write_fd(fd, buffer, p - buffer);
+        break;
+        case NGX_RTMP_DASH_CLOCK_COMPENSATION_HTTP_HEAD:
+                p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_CLOCK,
+                                 "http-head",
+                                 &dacf->clock_helper_uri
+                );
+                n = ngx_write_fd(fd, buffer, p - buffer);
+        break;
+        case NGX_RTMP_DASH_CLOCK_COMPENSATION_HTTP_ISO:
+                p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_CLOCK,
+                                 "http-iso",
+                                 &dacf->clock_helper_uri
+                );
+                n = ngx_write_fd(fd, buffer, p - buffer);
+        break;
+    }
+
+    p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_FOOTER);
+    n = ngx_write_fd(fd, buffer, p - buffer);
+
+    if (n < 0) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "dash: write failed: '%V'", &ctx->var_playlist_bak);
+        ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    ngx_close_file(fd);
+
+    if (ngx_rtmp_dash_rename_file(ctx->var_playlist_bak.data, ctx->var_playlist.data)
+        == NGX_FILE_ERROR)
+    {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "dash: rename failed: '%V'->'%V'",
+                      &ctx->var_playlist_bak, &ctx->var_playlist);
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(&v, sizeof(v));
+    ngx_str_set(&(v.module), "dash");
+    v.playlist.data = ctx->playlist.data;
+    v.playlist.len = ctx->playlist.len;
+    return next_playlist(s, &v);
+}
+
+
+static ngx_int_t
+ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
+{
+    char                      *sep;
+    u_char                    *p, *last;
+    ssize_t                    n;
+    ngx_fd_t                   fd, fds;
+    struct tm                  tm;
+    ngx_str_t                  noname, *name;
+    ngx_uint_t                 i, frame_rate_num, frame_rate_denom;
+    ngx_uint_t                 depth_msec, depth_sec;
+    ngx_uint_t                 update_period, update_period_msec;
+    ngx_uint_t                 start_time, buffer_time, buffer_time_msec;
+    ngx_uint_t                 presentation_delay, presentation_delay_msec;
+    ngx_uint_t                 gcd, par_x, par_y;
+    ngx_rtmp_dash_ctx_t       *ctx;
+    ngx_rtmp_codec_ctx_t      *codec_ctx;
+    ngx_rtmp_dash_frag_t      *f;
+    ngx_rtmp_dash_app_conf_t  *dacf;
+
+    ngx_rtmp_playlist_t        v;
+
+    static u_char              buffer[NGX_RTMP_DASH_BUFSIZE];
+    static u_char              available_time[NGX_RTMP_DASH_GMT_LENGTH];
+    static u_char              publish_time[NGX_RTMP_DASH_GMT_LENGTH];
+    static u_char              buffer_depth[sizeof("P00Y00M00DT00H00M00.000S")];
+    static u_char              frame_rate[(NGX_INT_T_LEN * 2) + 2];
+
+    dacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_dash_module);
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_dash_module);
+    codec_ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_codec_module);
+
+    if (dacf == NULL || ctx == NULL || codec_ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ctx->id == 0) {
+        ngx_rtmp_dash_write_init_segments(s, &ctx->drm_info);
+    }
+
+    fd = ngx_open_file(ctx->playlist_bak.data, NGX_FILE_WRONLY,
+                       NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
+
+    if (fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "dash: open failed: '%V'", &ctx->playlist_bak);
+        return NGX_ERROR;
+    }
+   
+    /* write segments file */
+    fds = ngx_open_file(ctx->segments_bak.data, NGX_FILE_WRONLY,
+                        NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
+
+    if (fds == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "dash: open failed: '%V'", &ctx->segments_bak);
+        return NGX_ERROR;
+    }
+
+    /* availabity and publish time should be relative to peer epoch */
+    start_time = ctx->start_time.sec - (s->peer_epoch/1000);
+    ngx_log_debug4(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+            "Fixing start_time=%uD %uD epoch=%uD new_start_time=%uD",
+            (uint32_t)ctx->start_time.sec, (uint32_t)ctx->start_time.msec,
+            (uint32_t)s->peer_epoch,
+            (uint32_t)start_time);
+
+    /**
+     * Availability time must be equal stream start time
+     * Cos segments time counting from it
+     */
+    ngx_libc_gmtime(start_time, &tm);
+    *ngx_sprintf(available_time, "%4d-%02d-%02dT%02d:%02d:%02dZ",
+             tm.tm_year + 1900, tm.tm_mon + 1,
+             tm.tm_mday, tm.tm_hour,
+             tm.tm_min, tm.tm_sec
+             ) = 0;
+
+    /* Stream publish time */
+    *ngx_sprintf(publish_time, "%s", available_time) = 0;
+
+    depth_sec = (ngx_uint_t) (
+                 ngx_rtmp_dash_get_frag(s, ctx->nfrags - 1)->timestamp +
+                 ngx_rtmp_dash_get_frag(s, ctx->nfrags - 1)->duration - 
+                 ngx_rtmp_dash_get_frag(s, 0)->timestamp);
+
+    depth_msec = depth_sec % 1000;
+    depth_sec -= depth_msec;
+    depth_sec /= 1000;
+
+    ngx_libc_gmtime(depth_sec, &tm);
+
+    *ngx_sprintf(buffer_depth, "P%dY%02dM%02dDT%dH%02dM%02d.%03dS",
+                 tm.tm_year - 70, tm.tm_mon,
+                 tm.tm_mday - 1, tm.tm_hour,
+                 tm.tm_min, tm.tm_sec,
+                 depth_msec) = 0;
+
+    last = buffer + sizeof(buffer);
+
+    /**
+     * Calculate playlist minimal update period
+     * This should be more than biggest segment duration
+     * Cos segments rounded by keyframe/GOP.
+     * And that time not always equals to fragment length.
+     */
+    update_period = dacf->fraglen;
+
+    for (i = 0; i < ctx->nfrags; i++) {
+        f = ngx_rtmp_dash_get_frag(s, i);
+        if (f->duration > update_period) {
+            update_period = f->duration;
+        }
+    }
+
+    // Reasonable delay for streaming
+    presentation_delay = update_period * 2 + 1000;
+    presentation_delay_msec = presentation_delay % 1000;
+    presentation_delay -= presentation_delay_msec;
+    presentation_delay /= 1000;
+
+    // Calculate msec part and seconds
+    update_period_msec = update_period % 1000;
+    update_period -= update_period_msec;
+    update_period /= 1000;
+
+    // Buffer length by default fragment length
+    buffer_time = dacf->fraglen;
+    buffer_time_msec = buffer_time % 1000;
+    buffer_time -= buffer_time_msec;
+    buffer_time /= 1000;
+
+    // Fill DASH header
+    p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_HEADER,
+                     // availabilityStartTime
+                     available_time,
                      // publishTime
                      publish_time,
                      // minimumUpdatePeriod
@@ -532,11 +1003,23 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
         par_x = codec_ctx->width / gcd;
         par_y = codec_ctx->height / gcd;
 
-        p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_VIDEO,
+        p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_VIDEO,
                          codec_ctx->width,
                          codec_ctx->height,
                          frame_rate,
-                         par_x, par_y,
+                         par_x, par_y);
+
+        switch (dacf->ad_markers) {
+            case NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT:
+            case NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT_SCTE35:
+                p = ngx_slprintf(p, last, NGX_RTMP_DASH_INBAND_EVENT);
+        }
+
+        if (dacf->cenc) {
+            p = ngx_rtmp_dash_write_content_protection(s, &ctx->drm_info, p, last);
+        }
+   
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_VIDEO,
                          &ctx->name,
                          codec_ctx->avc_profile,
                          codec_ctx->avc_compat,
@@ -548,19 +1031,28 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
                          name, sep,
                          name, sep);
 
-        for (i = 0; i < ctx->nfrags; i++) {
-            f = ngx_rtmp_dash_get_frag(s, i);
-            p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_TIME,
-                             f->timestamp, f->duration);
-        }
+        n = ngx_write_fd(fd, buffer, p - buffer);
 
-        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_VIDEO_FOOTER);
+        p = buffer;
+        p = ngx_rtmp_dash_write_segment_timeline(s, ctx, dacf, p, last);
+
+        ngx_write_fd(fds, buffer, p - buffer);
+
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_VIDEO_FOOTER);
+
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_VIDEO_FOOTER);
 
         n = ngx_write_fd(fd, buffer, p - buffer);
     }
 
     if (ctx->has_audio) {
-        p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_AUDIO,
+        p = ngx_slprintf(buffer, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_AUDIO);
+
+        if (dacf->cenc) {
+            p = ngx_rtmp_dash_write_content_protection(s, &ctx->drm_info, p, last);
+        }
+
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_AUDIO,
                          &ctx->name,
                          codec_ctx->audio_codec_id == NGX_RTMP_AUDIO_AAC ?
                          (codec_ctx->aac_sbr ? "40.5" : "40.2") : "6b",
@@ -569,13 +1061,11 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
                          name, sep,
                          name, sep);
 
-        for (i = 0; i < ctx->nfrags; i++) {
-            f = ngx_rtmp_dash_get_frag(s, i);
-            p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_TIME,
-                             f->timestamp, f->duration);
-        }
+        p = ngx_rtmp_dash_write_segment_timeline(s, ctx, dacf, p, last);
 
-        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_AUDIO_FOOTER);
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_REPRESENTATION_AUDIO_FOOTER);
+
+        p = ngx_slprintf(p, last, NGX_RTMP_DASH_MANIFEST_ADAPTATIONSET_AUDIO_FOOTER);
 
         n = ngx_write_fd(fd, buffer, p - buffer);
     }
@@ -619,6 +1109,7 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
     }
 
     ngx_close_file(fd);
+    ngx_close_file(fds);
 
     if (ngx_rtmp_dash_rename_file(ctx->playlist_bak.data, ctx->playlist.data)
         == NGX_FILE_ERROR)
@@ -627,6 +1118,20 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
                       "dash: rename failed: '%V'->'%V'",
                       &ctx->playlist_bak, &ctx->playlist);
         return NGX_ERROR;
+    }
+
+    if (ngx_rtmp_dash_rename_file(ctx->segments_bak.data, ctx->segments.data)
+        == NGX_FILE_ERROR)
+    {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                      "dash: rename failed: '%V'->'%V'",
+                      &ctx->segments_bak, &ctx->segments);
+        return NGX_ERROR;
+    }
+
+    /* try to write the variant file only once, check the max flag */
+    if (ctx->var && ctx->var->args.nelts > 3) {
+        return ngx_rtmp_dash_write_variant_playlist(s);
     }
 
     ngx_memzero(&v, sizeof(v));
@@ -638,20 +1143,22 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
 
 
 static ngx_int_t
-ngx_rtmp_dash_write_init_segments(ngx_rtmp_session_t *s)
+ngx_rtmp_dash_write_init_segments(ngx_rtmp_session_t *s, ngx_rtmp_cenc_drm_info_t *drmi)
 {
-    ngx_fd_t               fd;
-    ngx_int_t              rc;
-    ngx_buf_t              b;
-    ngx_rtmp_dash_ctx_t   *ctx;
-    ngx_rtmp_codec_ctx_t  *codec_ctx;
+    ngx_fd_t                   fd;
+    ngx_int_t                  rc;
+    ngx_buf_t                  b;
+    ngx_rtmp_dash_ctx_t       *ctx;
+    ngx_rtmp_codec_ctx_t      *codec_ctx;
+    ngx_rtmp_dash_app_conf_t  *dacf;
 
     static u_char          buffer[NGX_RTMP_DASH_BUFSIZE];
 
+    dacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_dash_module);
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_dash_module);
     codec_ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_codec_module);
 
-    if (ctx == NULL || codec_ctx == NULL) {
+    if (dacf == NULL || ctx == NULL || codec_ctx == NULL) {
         return NGX_ERROR;
     }
 
@@ -673,7 +1180,11 @@ ngx_rtmp_dash_write_init_segments(ngx_rtmp_session_t *s)
     b.pos = b.last = b.start;
 
     ngx_rtmp_mp4_write_ftyp(&b);
-    ngx_rtmp_mp4_write_moov(s, &b, NGX_RTMP_MP4_VIDEO_TRACK);
+    if (dacf->cenc) {
+        ngx_rtmp_mp4_write_moov(s, &b, NGX_RTMP_MP4_EVIDEO_TRACK, drmi);
+    } else {
+        ngx_rtmp_mp4_write_moov(s, &b, NGX_RTMP_MP4_VIDEO_TRACK, NULL);
+    } 
 
     rc = ngx_write_fd(fd, b.start, (size_t) (b.last - b.start));
     if (rc == NGX_ERROR) {
@@ -699,7 +1210,11 @@ ngx_rtmp_dash_write_init_segments(ngx_rtmp_session_t *s)
     b.pos = b.last = b.start;
 
     ngx_rtmp_mp4_write_ftyp(&b);
-    ngx_rtmp_mp4_write_moov(s, &b, NGX_RTMP_MP4_AUDIO_TRACK);
+    if (dacf->cenc) {
+        ngx_rtmp_mp4_write_moov(s, &b, NGX_RTMP_MP4_EAUDIO_TRACK, drmi);
+    } else {
+        ngx_rtmp_mp4_write_moov(s, &b, NGX_RTMP_MP4_AUDIO_TRACK, NULL);
+    } 
 
     rc = ngx_write_fd(fd, b.start, (size_t) (b.last - b.start));
     if (rc == NGX_ERROR) {
@@ -740,13 +1255,58 @@ ngx_rtmp_dash_close_fragment(ngx_rtmp_session_t *s, ngx_rtmp_dash_track_t *t)
     b.end = buffer + sizeof(buffer);
     b.pos = b.last = b.start;
 
+    if (ctx->start_cuepoint) {
+
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+            "dash : onCuepoint write start emsg : epts='%uD', lpts='%uD', cpts='%uD', "\
+            "ecpts='%uD', duration='%uD', prid='%uD'",
+            t->earliest_pres_time, t->latest_pres_time, ctx->cuepoint_starttime, 
+            ctx->cuepoint_endtime, ctx->cuepoint_duration, ctx->cuepoint_id);
+
+        /* should be ngx_rtmp_mp4_write_emsg(&b, t->earliest_pres_time, 
+           thanks to dashjs
+         */
+        ngx_rtmp_mp4_write_emsg(&b, 0, 
+                                ctx->cuepoint_starttime, 
+                                ctx->cuepoint_duration,
+                                ctx->cuepoint_id);
+
+        pos = b.last;
+        b.last = pos;
+        ctx->start_cuepoint = 0;
+        ctx->cuepoint_duration = 0;
+        ctx->end_cuepoint = 1;
+
+    } else if (ctx->end_cuepoint && ctx->cuepoint_endtime >= t->earliest_pres_time 
+        && ctx->cuepoint_endtime <= t->latest_pres_time) {
+
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+            "dash : onCuepoint write end emsg : epts='%uD', lpts='%uD', cpts='%uD', "\
+            "ecpts='%uD', duration='%uD', prid='%uD'",
+            t->earliest_pres_time, t->latest_pres_time, ctx->cuepoint_starttime, 
+            ctx->cuepoint_endtime, ctx->cuepoint_duration, ctx->cuepoint_id);
+
+        /* end marker have duration set to zero and prid set to zero */
+        ngx_rtmp_mp4_write_emsg(&b, 0, 
+                                ctx->cuepoint_endtime, 
+                                0,
+                                0);
+
+        pos = b.last;
+        b.last = pos;
+        ctx->end_cuepoint = 0;
+    } else if (ctx->end_cuepoint && ctx->cuepoint_endtime < t->earliest_pres_time ) {
+        /* fallback */
+        ctx->end_cuepoint = 0;
+    }   
+
     ngx_rtmp_mp4_write_styp(&b);
 
     pos = b.last;
     b.last += 44; /* leave room for sidx */
 
-    ngx_rtmp_mp4_write_moof(&b, t->earliest_pres_time, t->sample_count,
-                            t->samples, t->sample_mask, t->id);
+    ngx_rtmp_mp4_write_moof(&b, t->earliest_pres_time, t->type, t->sample_count,
+                            t->samples, t->sample_mask, t->id, t->is_protected);
     pos1 = b.last;
     b.last = pos;
 
@@ -850,7 +1410,8 @@ static ngx_int_t
 ngx_rtmp_dash_open_fragment(ngx_rtmp_session_t *s, ngx_rtmp_dash_track_t *t,
     ngx_uint_t id, char type)
 {
-    ngx_rtmp_dash_ctx_t   *ctx;
+    ngx_rtmp_dash_ctx_t       *ctx;
+    ngx_rtmp_dash_app_conf_t  *dacf;
 
     if (t->opened) {
         return NGX_OK;
@@ -860,6 +1421,7 @@ ngx_rtmp_dash_open_fragment(ngx_rtmp_session_t *s, ngx_rtmp_dash_track_t *t,
                    "dash: open fragment id=%ui, type='%c'", id, type);
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_dash_module);
+    dacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_dash_module);
 
     *ngx_sprintf(ctx->stream.data + ctx->stream.len, "raw.m4%c", type) = 0;
 
@@ -879,6 +1441,17 @@ ngx_rtmp_dash_open_fragment(ngx_rtmp_session_t *s, ngx_rtmp_dash_track_t *t,
     t->latest_pres_time = 0;
     t->mdat_size = 0;
     t->opened = 1;
+     
+    if (dacf->cenc) {
+
+        if (ngx_rtmp_cenc_read_hex(dacf->cenc_key, t->key) == NGX_ERROR) {
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                          "dash: error cenc key is invalid");
+            return NGX_ERROR;
+        }
+
+        t->is_protected = 1;
+    }
 
     if (type == 'v') {
         t->sample_mask = NGX_RTMP_MP4_SAMPLE_SIZE|
@@ -1022,11 +1595,13 @@ ngx_rtmp_dash_ensure_directory(ngx_rtmp_session_t *s)
 static ngx_int_t
 ngx_rtmp_dash_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 {
-    u_char                    *p;
+    u_char                    *p, *pp;
     size_t                     len;
     ngx_rtmp_dash_ctx_t       *ctx;
     ngx_rtmp_dash_frag_t      *f;
     ngx_rtmp_dash_app_conf_t  *dacf;
+    ngx_rtmp_dash_variant_t   *var;
+    ngx_uint_t                 n;
 
     dacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_dash_module);
     if (dacf == NULL || !dacf->dash || dacf->path.len == 0) {
@@ -1113,6 +1688,53 @@ ngx_rtmp_dash_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     ngx_memcpy(ctx->stream.data, ctx->playlist.data, ctx->stream.len - 1);
     ctx->stream.data[ctx->stream.len - 1] = (dacf->nested ? '/' : '-');
 
+    if (dacf->variant) {
+        var = dacf->variant->elts;
+        for (n = 0; n < dacf->variant->nelts; n++, var++) {
+            if (ctx->name.len > var->suffix.len &&
+                ngx_memcmp(var->suffix.data,
+                    ctx->name.data + ctx->name.len - var->suffix.len,
+                    var->suffix.len)
+                == 0)
+            {
+                len = (size_t) (ctx->name.len - var->suffix.len);
+
+                ctx->varname.len = len;
+                ctx->varname.data = ngx_palloc(s->connection->pool,
+                        ctx->varname.len + 1);
+                pp = ngx_cpymem(ctx->varname.data,
+                                ctx->name.data, len);
+                
+                *pp = 0;
+
+                ctx->var = var;
+
+                len = (size_t) (p - ctx->playlist.data);
+
+                ctx->var_playlist.len = len - var->suffix.len + sizeof(".mpd")
+                    -1;
+                ctx->var_playlist.data = ngx_palloc(s->connection->pool,
+                        ctx->var_playlist.len + 1);
+                pp = ngx_cpymem(ctx->var_playlist.data,
+                        ctx->playlist.data, len - var->suffix.len);
+                pp = ngx_cpymem(pp, ".mpd", sizeof(".mpd") - 1);
+                *pp = 0;
+
+                ctx->var_playlist_bak.len = ctx->var_playlist.len +
+                                            sizeof(".bak") - 1;
+                ctx->var_playlist_bak.data = ngx_palloc(s->connection->pool,
+                                                 ctx->var_playlist_bak.len + 1);
+                pp = ngx_cpymem(ctx->var_playlist_bak.data,
+                                ctx->var_playlist.data,
+                                ctx->var_playlist.len);
+                pp = ngx_cpymem(pp, ".bak", sizeof(".bak") - 1);
+                *pp = 0;
+
+                break;
+            }
+        }
+    }
+
     if (dacf->nested) {
         p = ngx_cpymem(p, "/index.mpd", sizeof("/index.mpd") - 1);
     } else {
@@ -1135,14 +1757,56 @@ ngx_rtmp_dash_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 
     *p = 0;
 
-    ngx_log_debug3(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
-                   "dash: playlist='%V' playlist_bak='%V' stream_pattern='%V'",
-                   &ctx->playlist, &ctx->playlist_bak, &ctx->stream);
+    /* segments path */
+
+    ctx->segments.data = ngx_palloc(s->connection->pool,
+                                        ctx->playlist.len - 4 + sizeof(".seg"));
+    p = ngx_cpymem(ctx->segments.data, ctx->playlist.data,
+                   ctx->playlist.len - 4);
+    p = ngx_cpymem(p, ".seg", sizeof(".seg") - 1);
+
+    ctx->segments.len = p - ctx->segments.data;
+
+    *p = 0;
+
+    /* segments bak (new segments) path */
+
+    ctx->segments_bak.data = ngx_palloc(s->connection->pool,
+                                        ctx->playlist.len - 4 + sizeof(".sbk"));
+    p = ngx_cpymem(ctx->segments_bak.data, ctx->playlist.data,
+                   ctx->playlist.len - 4);
+    p = ngx_cpymem(p, ".sbk", sizeof(".sbk") - 1);
+
+    ctx->segments_bak.len = p - ctx->segments_bak.data;
+
+    *p = 0;
+
+    ngx_log_debug5(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                   "dash: playlist='%V' playlist_bak='%V' segments='%V' segments_bak='%V' stream_pattern='%V'",
+                   &ctx->playlist, &ctx->playlist_bak, &ctx->segments, &ctx->segments_bak, &ctx->stream);
 
     ctx->start_time = *ngx_cached_time;
 
     if (ngx_rtmp_dash_ensure_directory(s) != NGX_OK) {
         return NGX_ERROR;
+    }
+   
+    /* drm info */
+    if (dacf->cenc) {
+        if (ngx_rtmp_cenc_read_hex(dacf->cenc_kid, ctx->drm_info.kid) == NGX_ERROR) {
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "dash: error cenc kid is invalid");
+            return NGX_ERROR;
+        }
+        if (dacf->wdv) {
+            ctx->drm_info.wdv = 1;
+            ctx->drm_info.wdv_data = dacf->wdv_data;
+        }
+        if (dacf->mspr) {
+            ctx->drm_info.mspr = 1;
+            ctx->drm_info.mspr_data = dacf->mspr_data;
+            ctx->drm_info.mspr_kid = dacf->mspr_kid;
+            ctx->drm_info.mspr_pro = dacf->mspr_pro;
+        }
     }
 
 next:
@@ -1173,7 +1837,6 @@ next:
     return next_close_stream(s, v);
 }
 
-
 static void
 ngx_rtmp_dash_update_fragments(ngx_rtmp_session_t *s, ngx_int_t boundary,
     uint32_t timestamp)
@@ -1202,7 +1865,6 @@ ngx_rtmp_dash_update_fragments(ngx_rtmp_session_t *s, ngx_int_t boundary,
     } else {
 
         /* sometimes clients generate slightly unordered frames */
-
         hit = (-d > 1000);
     }
 
@@ -1258,11 +1920,11 @@ static ngx_int_t
 ngx_rtmp_dash_append(ngx_rtmp_session_t *s, ngx_chain_t *in,
     ngx_rtmp_dash_track_t *t, ngx_int_t key, uint32_t timestamp, uint32_t delay)
 {
-    u_char                 *p;
-    size_t                  size, bsize;
-    ngx_rtmp_mp4_sample_t  *smpl;
+    u_char                    *p;
+    size_t                     size, bsize, csize;
+    ngx_rtmp_mp4_sample_t     *smpl;
 
-    static u_char           buffer[NGX_RTMP_DASH_BUFSIZE];
+    static u_char              buffer[NGX_RTMP_DASH_BUFSIZE];
 
     p = buffer;
     size = 0;
@@ -1282,18 +1944,35 @@ ngx_rtmp_dash_append(ngx_rtmp_session_t *s, ngx_chain_t *in,
 
     if (t->sample_count == 0) {
         t->earliest_pres_time = timestamp;
+        if (t->is_protected) {
+            ngx_rtmp_cenc_rand_iv(t->iv);
+        }
     }
 
     t->latest_pres_time = timestamp;
 
     if (t->sample_count < NGX_RTMP_DASH_MAX_SAMPLES) {
 
+        if (t->is_protected) {
+            if (t->type == 'v') {
+                ngx_rtmp_cenc_encrypt_sub_sample(s, t->key, t->iv, buffer, size, &csize); 
+                ngx_log_debug4(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                    "dash: cenc crypt video sample: count=%ui, key=%ui, size=%ui, csize=%ui",
+                     t->sample_count, key, size, csize);
+            } else {
+                ngx_rtmp_cenc_encrypt_full_sample(s, t->key, t->iv, buffer, size); 
+                ngx_log_debug3(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                    "dash: cenc crypt audio sample: count=%ui, key=%ui, size=%ui",
+                     t->sample_count, key, size);
+            }
+        }
+
         if (ngx_write_fd(t->fd, buffer, size) == NGX_ERROR) {
             ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                           "dash: " ngx_write_fd_n " failed");
             return NGX_ERROR;
-        }
-
+        } 
+        
         smpl = &t->samples[t->sample_count];
 
         smpl->delay = delay;
@@ -1301,6 +1980,15 @@ ngx_rtmp_dash_append(ngx_rtmp_session_t *s, ngx_chain_t *in,
         smpl->duration = 0;
         smpl->timestamp = timestamp;
         smpl->key = (key ? 1 : 0);
+
+        if (t->is_protected) {
+            smpl->is_protected = 1;
+            ngx_memcpy(smpl->iv, t->iv, NGX_RTMP_CENC_IV_SIZE);
+            ngx_rtmp_cenc_increment_iv(t->iv);
+            if (t->type == 'v') {
+		    smpl->clear_size = (uint32_t) csize;
+            }
+        }
 
         if (t->sample_count > 0) {
             smpl = &t->samples[t->sample_count - 1];
@@ -1394,6 +2082,7 @@ ngx_rtmp_dash_video(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         return NGX_ERROR;
     }
 
+    /* check what header it is */
     ftype = (in->buf->pos[0] & 0xf0) >> 4;
 
     /* skip AVC config */
@@ -1621,6 +2310,7 @@ ngx_rtmp_dash_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
     }
 }
 
+
 #if (nginx_version >= 1011005)
 static ngx_msec_t
 #else
@@ -1641,11 +2331,364 @@ ngx_rtmp_dash_cleanup(void *data)
 #endif
 }
 
+
+static char *
+ngx_rtmp_dash_variant(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_rtmp_dash_app_conf_t  *dacf = conf;
+
+    ngx_str_t                *value, *arg;
+    ngx_uint_t                n;
+    ngx_rtmp_dash_variant_t   *var;
+
+    value = cf->args->elts;
+
+    if (dacf->variant == NULL) {
+        dacf->variant = ngx_array_create(cf->pool, 1,
+                                         sizeof(ngx_rtmp_dash_variant_t));
+        if (dacf->variant == NULL) {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    var = ngx_array_push(dacf->variant);
+    if (var == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(var, sizeof(ngx_rtmp_dash_variant_t));
+
+    var->suffix = value[1];
+
+    if (cf->args->nelts == 2) {
+        return NGX_CONF_OK;
+    }
+
+    if (ngx_array_init(&var->args, cf->pool, cf->args->nelts - 2,
+                       sizeof(ngx_str_t))
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    arg = ngx_array_push_n(&var->args, cf->args->nelts - 2);
+    if (arg == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    for (n = 2; n < cf->args->nelts; n++) {
+        *arg++ = value[n];
+    }
+
+    return NGX_CONF_OK;
+}
+
+
 static ngx_int_t
 ngx_rtmp_dash_playlist(ngx_rtmp_session_t *s, ngx_rtmp_playlist_t *v)
 {
     return next_playlist(s, v);
 }
+
+
+static ngx_int_t
+ngx_rtmp_dash_on_cuepoint(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
+    ngx_chain_t *in)
+{
+    ngx_int_t                  res;
+    ngx_rtmp_dash_ctx_t       *ctx;
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_dash_module);
+
+    static struct {
+        double                  time;
+        double                  duration;
+        u_char                  name[128];
+        u_char                  type[128];
+        u_char                  ptype[128];
+    } v;
+
+    static ngx_rtmp_amf_elt_t   in_pr_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_string("type"),
+          v.ptype, sizeof(v.ptype) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("duration"),
+          &v.duration, sizeof(v.duration) },
+
+    };
+
+    static ngx_rtmp_amf_elt_t   in_dt_elts[] = {
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("time"),
+          &v.time, sizeof(v.time) },
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_string("name"),
+          v.name, sizeof(v.name) },
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_string("type"),
+          v.type, sizeof(v.type) },
+
+        { NGX_RTMP_AMF_OBJECT,
+          ngx_string("parameters"),
+          in_pr_elts, sizeof(in_pr_elts) },
+
+    };
+    
+    static ngx_rtmp_amf_elt_t   in_elts[] = {
+
+        { NGX_RTMP_AMF_OBJECT,
+          ngx_null_string,
+          in_dt_elts, sizeof(in_dt_elts) },
+
+    };
+
+    ngx_memzero(&v, sizeof(v));
+    res = ngx_rtmp_receive_amf(s, in, in_elts,
+        sizeof(in_elts) / sizeof(in_elts[0]));
+
+    if (res == NGX_OK && v.duration > 0) {
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+            "dash : onCuepoint : ts='%ui', time='%f', name='%s' type='%s' ptype='%s' duration='%f'",
+            h->timestamp, v.time, v.name, v.type, v.ptype, v.duration);
+        ctx->start_cuepoint = 1;
+        ctx->cuepoint_starttime = h->timestamp;
+        ctx->cuepoint_endtime = h->timestamp+(v.duration*1000); 
+        ctx->cuepoint_duration = v.duration;
+        ctx->cuepoint_id = 0;
+    } else {
+        ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+            "dash : onCuepoint : amf not understood");
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_rtmp_dash_on_cuepoint_scte35(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
+    ngx_chain_t *in)
+{
+    ngx_int_t                  res;
+    ngx_rtmp_dash_ctx_t       *ctx;
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_dash_module);
+
+    static struct {
+        unsigned                ooni;
+        unsigned                splice_event_ci;
+        unsigned                splice_imd;
+        double                  avail_num;
+        double                  avail_expected;
+        double                  duration;
+        double                  prtime;
+        double                  prgid;
+        double                  sctype;
+        double                  sevtid;
+        u_char                  type[128];
+        u_char                  mtype[128];
+    }  v;
+
+    static ngx_rtmp_amf_elt_t   in_pr_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_string("messageType"),
+          v.mtype, sizeof(v.mtype) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("splice_command_type"),
+          &v.sctype, sizeof(v.sctype) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("splice_event_id"),
+          &v.sevtid, sizeof(v.sevtid) },
+
+        { NGX_RTMP_AMF_BOOLEAN,
+          ngx_string("splice_event_cancel_indicator"),
+          &v.splice_event_ci, sizeof(v.splice_event_ci) },
+
+        { NGX_RTMP_AMF_BOOLEAN,
+          ngx_string("out_of_network_indicator"),
+          &v.ooni, sizeof(v.ooni) },
+
+        { NGX_RTMP_AMF_BOOLEAN,
+          ngx_string("splice_immediate"),
+          &v.splice_imd, sizeof(v.splice_imd) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("pre_roll_time"),
+          &v.prtime, sizeof(v.prtime) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("break_duration"),
+          &v.duration, sizeof(v.duration) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("unique_program_id"),
+          &v.prgid, sizeof(v.prgid) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("avail_num"),
+          &v.avail_num, sizeof(v.avail_num) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("avail_expected"),
+          &v.avail_expected, sizeof(v.avail_expected) },
+
+    };
+
+    static ngx_rtmp_amf_elt_t   in_dt_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_string("type"),
+          v.type, sizeof(v.type) },
+
+        { NGX_RTMP_AMF_OBJECT,
+          ngx_string("parameters"),
+          in_pr_elts, sizeof(in_pr_elts) },
+
+    };
+    
+    static ngx_rtmp_amf_elt_t   in_elts[] = {
+
+        { NGX_RTMP_AMF_OBJECT,
+          ngx_null_string,
+          in_dt_elts, sizeof(in_dt_elts) },
+
+    };
+
+    ngx_memzero(&v, sizeof(v));
+    res = ngx_rtmp_receive_amf(s, in, in_elts,
+        sizeof(in_elts) / sizeof(in_elts[0]));
+
+    if (res == NGX_OK && v.duration > 0) {
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+            "dash : onCuepoint_scte35 : ts='%ui', type='%s', mtype='%s', sctype='%f', "\
+            "scid='%f', prgid='%f', duration='%f', avail_num='%f', avail_expected='%f'",
+            h->timestamp, v.type, v.mtype, v.sctype, 
+            v.sevtid, v.prgid, v.duration, v.avail_num, v.avail_expected);
+        ctx->start_cuepoint = 1;
+        ctx->cuepoint_starttime = h->timestamp;
+        ctx->cuepoint_endtime = h->timestamp + v.duration; 
+        ctx->cuepoint_duration = v.duration;
+        ctx->cuepoint_id = v.prgid;
+    } else {
+        ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+            "dash : onCuepoint_scte35 : amf not understood");
+    }
+    
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_rtmp_dash_on_cuepoint_cont_scte35(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
+    ngx_chain_t *in)
+{
+    ngx_int_t                  res;
+
+    static struct {
+        double                  segupid;
+        double                  segduration;
+        double                  segrduration;
+        u_char                  type[128];
+        u_char                  mtype[128];
+    }  v;
+
+    static ngx_rtmp_amf_elt_t   in_pr_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_string("messageType"),
+          v.mtype, sizeof(v.mtype) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("segmentation_upid"),
+          &v.segupid, sizeof(v.segupid) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("segmentation_duration"),
+          &v.segduration, sizeof(v.segduration) },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("segmentation_remaining_duration"),
+          &v.segrduration, sizeof(v.segrduration) },
+
+    };
+
+    static ngx_rtmp_amf_elt_t   in_dt_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_string("type"),
+          v.type, sizeof(v.type) },
+
+        { NGX_RTMP_AMF_OBJECT,
+          ngx_string("parameters"),
+          in_pr_elts, sizeof(in_pr_elts) },
+
+    };
+    
+    static ngx_rtmp_amf_elt_t   in_elts[] = {
+
+        { NGX_RTMP_AMF_OBJECT,
+          ngx_null_string,
+          in_dt_elts, sizeof(in_dt_elts) },
+
+    };
+
+    ngx_memzero(&v, sizeof(v));
+    res = ngx_rtmp_receive_amf(s, in, in_elts,
+        sizeof(in_elts) / sizeof(in_elts[0]));
+
+    if (res == NGX_OK && v.segrduration > 0) {
+        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+            "dash : onCuepoint_cont_scte35 : ts='%ui', type='%s', "\
+            "segupid='%f', segduration='%f', segrduration='%f'",
+            h->timestamp, v.mtype, v.segupid, v.segduration, v.segrduration);
+    } else {
+        ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+            "dash : onCuepoint_cont_scte35 : amf not understood");
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_rtmp_dash_ad_markers(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
+    ngx_chain_t *in)
+{
+    ngx_rtmp_dash_app_conf_t  *dacf;
+    ngx_rtmp_dash_ctx_t       *ctx;
+
+    dacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_dash_module);
+    if (dacf == NULL || !dacf->dash || dacf->path.len == 0) {
+        return NGX_OK;
+    }
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_dash_module);
+
+    switch (dacf->ad_markers) {
+        case NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT:
+            return ngx_rtmp_dash_on_cuepoint(s, h, in);
+        break;
+        case NGX_RTMP_DASH_AD_MARKERS_ON_CUEPOINT_SCTE35:
+	    if (ctx->end_cuepoint)
+                return ngx_rtmp_dash_on_cuepoint_cont_scte35(s, h, in);
+            else
+                return ngx_rtmp_dash_on_cuepoint_scte35(s, h, in);
+        break;
+        default:
+            return NGX_OK;
+    }
+
+    return NGX_OK;
+}
+
 
 static void *
 ngx_rtmp_dash_create_app_conf(ngx_conf_t *cf)
@@ -1662,7 +2705,12 @@ ngx_rtmp_dash_create_app_conf(ngx_conf_t *cf)
     conf->playlen = NGX_CONF_UNSET_MSEC;
     conf->cleanup = NGX_CONF_UNSET;
     conf->nested = NGX_CONF_UNSET;
+    conf->repetition = NGX_CONF_UNSET;
+    conf->cenc = NGX_CONF_UNSET;
+    conf->wdv = NGX_CONF_UNSET;
+    conf->mspr = NGX_CONF_UNSET;
     conf->clock_compensation = NGX_CONF_UNSET;
+    conf->ad_markers = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -1680,9 +2728,21 @@ ngx_rtmp_dash_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_msec_value(conf->playlen, prev->playlen, 30000);
     ngx_conf_merge_value(conf->cleanup, prev->cleanup, 1);
     ngx_conf_merge_value(conf->nested, prev->nested, 0);
+    ngx_conf_merge_value(conf->repetition, prev->repetition, 0);
+    ngx_conf_merge_value(conf->cenc, prev->cenc, 0);
+    ngx_conf_merge_str_value(conf->cenc_key, prev->cenc_key, "");
+    ngx_conf_merge_str_value(conf->cenc_kid, prev->cenc_kid, "");
+    ngx_conf_merge_value(conf->wdv, prev->wdv, 0);
+    ngx_conf_merge_str_value(conf->wdv_data, prev->wdv_data, "");
+    ngx_conf_merge_value(conf->mspr, prev->mspr, 0);
+    ngx_conf_merge_str_value(conf->mspr_data, prev->mspr_data, "");
+    ngx_conf_merge_str_value(conf->mspr_kid, prev->mspr_kid, "");
+    ngx_conf_merge_str_value(conf->mspr_pro, prev->mspr_pro, "");
     ngx_conf_merge_uint_value(conf->clock_compensation, prev->clock_compensation,
                               NGX_RTMP_DASH_CLOCK_COMPENSATION_OFF);
     ngx_conf_merge_str_value(conf->clock_helper_uri, prev->clock_helper_uri, "");
+    ngx_conf_merge_uint_value(conf->ad_markers, prev->ad_markers,
+                              NGX_RTMP_DASH_AD_MARKERS_OFF);
 
     if (conf->fraglen) {
         conf->winfrags = conf->playlen / conf->fraglen;
@@ -1730,6 +2790,7 @@ ngx_rtmp_dash_postconfiguration(ngx_conf_t *cf)
 {
     ngx_rtmp_handler_pt        *h;
     ngx_rtmp_core_main_conf_t  *cmcf;
+    ngx_rtmp_amf_handler_t     *ch;
 
     cmcf = ngx_rtmp_conf_get_module_main_conf(cf, ngx_rtmp_core_module);
 
@@ -1753,6 +2814,10 @@ ngx_rtmp_dash_postconfiguration(ngx_conf_t *cf)
 
     next_playlist = ngx_rtmp_playlist;
     ngx_rtmp_playlist = ngx_rtmp_dash_playlist;
+
+    ch = ngx_array_push(&cmcf->amf);
+    ngx_str_set(&ch->name, "onCuePoint");
+    ch->handler = ngx_rtmp_dash_ad_markers;
 
     return NGX_OK;
 }

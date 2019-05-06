@@ -1253,7 +1253,7 @@ ngx_rtmp_live_on_fi(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     if (res == NGX_OK) {
 
-        ngx_log_error(NGX_LOG_DEBUG, s->connection->log, 0,
+        ngx_log_debug2(NGX_LOG_DEBUG, s->connection->log, 0,
             "live: onFi: date='%s', time='%s'",
             v.date, v.time);
 

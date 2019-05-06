@@ -7,6 +7,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_rtmp.h>
+#include "ngx_rtmp_cenc.h"
 
 
 #define NGX_RTMP_MP4_SAMPLE_SIZE        0x01
@@ -17,10 +18,13 @@
 
 typedef struct {
     uint32_t        size;
+    uint32_t        clear_size;
     uint32_t        duration;
     uint32_t        delay;
     uint32_t        timestamp;
     unsigned        key:1;
+    unsigned        is_protected:1;
+    u_char          iv[NGX_RTMP_CENC_IV_SIZE];
 } ngx_rtmp_mp4_sample_t;
 
 
@@ -32,21 +36,24 @@ typedef enum {
 
 typedef enum {
     NGX_RTMP_MP4_VIDEO_TRACK,
-    NGX_RTMP_MP4_AUDIO_TRACK
+    NGX_RTMP_MP4_AUDIO_TRACK,
+    NGX_RTMP_MP4_EVIDEO_TRACK,
+    NGX_RTMP_MP4_EAUDIO_TRACK
 } ngx_rtmp_mp4_track_type_t;
 
 
 ngx_int_t ngx_rtmp_mp4_write_ftyp(ngx_buf_t *b);
 ngx_int_t ngx_rtmp_mp4_write_styp(ngx_buf_t *b);
 ngx_int_t ngx_rtmp_mp4_write_moov(ngx_rtmp_session_t *s, ngx_buf_t *b,
-    ngx_rtmp_mp4_track_type_t ttype);
+    ngx_rtmp_mp4_track_type_t ttype, ngx_rtmp_cenc_drm_info_t *drmi);
 ngx_int_t ngx_rtmp_mp4_write_moof(ngx_buf_t *b, uint32_t earliest_pres_time,
-    uint32_t sample_count, ngx_rtmp_mp4_sample_t *samples,
-    ngx_uint_t sample_mask, uint32_t index);
+    char type, uint32_t sample_count, ngx_rtmp_mp4_sample_t *samples,
+    ngx_uint_t sample_mask, uint32_t index, ngx_flag_t is_protected);
 ngx_int_t ngx_rtmp_mp4_write_sidx(ngx_buf_t *b,
     ngx_uint_t reference_size, uint32_t earliest_pres_time,
     uint32_t latest_pres_time);
-ngx_uint_t ngx_rtmp_mp4_write_mdat(ngx_buf_t *b, ngx_uint_t size);
-
+ngx_int_t ngx_rtmp_mp4_write_mdat(ngx_buf_t *b, ngx_uint_t size);
+ngx_int_t ngx_rtmp_mp4_write_emsg(ngx_buf_t *b,
+    uint32_t earliest_pres_time, uint32_t cuepoint_time, uint32_t duration_time, uint32_t id);
 
 #endif /* _NGX_RTMP_MP4_H_INCLUDED_ */
