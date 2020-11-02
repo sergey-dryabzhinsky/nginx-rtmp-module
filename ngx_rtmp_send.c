@@ -895,7 +895,7 @@ ngx_rtmp_create_fi(ngx_rtmp_session_t *s)
 
         { NGX_RTMP_AMF_STRING,
           ngx_null_string,
-          "onFi", 0 },
+          "onFI", 0 },
 
         { NGX_RTMP_AMF_NUMBER,
           ngx_null_string,

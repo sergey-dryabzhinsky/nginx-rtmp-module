@@ -20,6 +20,7 @@
 static ngx_rtmp_publish_pt              next_publish;
 static ngx_rtmp_play_pt                 next_play;
 static ngx_rtmp_close_stream_pt         next_close_stream;
+static ngx_rtmp_record_started_pt       next_record_started;
 static ngx_rtmp_record_done_pt          next_record_done;
 #endif
 
@@ -55,6 +56,7 @@ enum {
     NGX_RTMP_EXEC_PUBLISH_DONE,
     NGX_RTMP_EXEC_PLAY,
     NGX_RTMP_EXEC_PLAY_DONE,
+    NGX_RTMP_EXEC_RECORD_STARTED,
     NGX_RTMP_EXEC_RECORD_DONE,
 
     NGX_RTMP_EXEC_MAX,
@@ -206,6 +208,15 @@ static ngx_command_t  ngx_rtmp_exec_commands[] = {
       NGX_RTMP_APP_CONF_OFFSET,
       offsetof(ngx_rtmp_exec_app_conf_t, conf) +
       NGX_RTMP_EXEC_PLAY_DONE * sizeof(ngx_array_t),
+      NULL },
+
+    { ngx_string("exec_record_started"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_RTMP_REC_CONF|
+                         NGX_CONF_1MORE,
+      ngx_rtmp_exec_conf,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_exec_app_conf_t, conf) +
+      NGX_RTMP_EXEC_RECORD_STARTED * sizeof(ngx_array_t),
       NULL },
 
     { ngx_string("exec_record_done"),
@@ -1308,6 +1319,31 @@ next:
 
 
 static ngx_int_t
+ngx_rtmp_exec_record_started(ngx_rtmp_session_t *s, ngx_rtmp_record_started_t *v)
+{
+    ngx_rtmp_exec_app_conf_t  *eacf;
+
+    if (s->auto_pushed) {
+        goto next;
+    }
+
+    eacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_exec_module);
+    if (eacf == NULL || !eacf->active) {
+        goto next;
+    }
+
+    ngx_rtmp_exec_unmanaged(s, &eacf->conf[NGX_RTMP_EXEC_RECORD_STARTED],
+                            "record_started");
+
+    ngx_str_null(&v->recorder);
+    ngx_str_null(&v->path);
+
+next:
+    return next_record_started(s, v);
+}
+
+
+static ngx_int_t
 ngx_rtmp_exec_record_done(ngx_rtmp_session_t *s, ngx_rtmp_record_done_t *v)
 {
     u_char                     c;
@@ -1364,6 +1400,7 @@ ngx_rtmp_exec_record_done(ngx_rtmp_session_t *s, ngx_rtmp_record_done_t *v)
 next:
     return next_record_done(s, v);
 }
+
 #endif /* NGX_WIN32 */
 
 
@@ -1602,6 +1639,9 @@ ngx_rtmp_exec_postconfiguration(ngx_conf_t *cf)
 
     next_record_done = ngx_rtmp_record_done;
     ngx_rtmp_record_done = ngx_rtmp_exec_record_done;
+
+    next_record_started = ngx_rtmp_record_started;
+    ngx_rtmp_record_started = ngx_rtmp_exec_record_started;
 
 #endif /* NGX_WIN32 */
 

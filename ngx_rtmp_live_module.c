@@ -47,9 +47,9 @@ static ngx_command_t  ngx_rtmp_live_commands[] = {
 
     { ngx_string("buffer"),
       NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_msec_slot,
+      ngx_conf_set_flag_slot,
       NGX_RTMP_APP_CONF_OFFSET,
-      offsetof(ngx_rtmp_live_app_conf_t, buflen),
+      offsetof(ngx_rtmp_live_app_conf_t, buffer),
       NULL },
 
     { ngx_string("sync"),
@@ -152,7 +152,7 @@ ngx_rtmp_live_create_app_conf(ngx_conf_t *cf)
 
     lacf->live = NGX_CONF_UNSET;
     lacf->nbuckets = NGX_CONF_UNSET;
-    lacf->buflen = NGX_CONF_UNSET_MSEC;
+    lacf->buffer = NGX_CONF_UNSET;
     lacf->sync = NGX_CONF_UNSET_MSEC;
     lacf->idle_timeout = NGX_CONF_UNSET_MSEC;
     lacf->interleave = NGX_CONF_UNSET;
@@ -174,7 +174,7 @@ ngx_rtmp_live_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->live, prev->live, 0);
     ngx_conf_merge_value(conf->nbuckets, prev->nbuckets, 1024);
-    ngx_conf_merge_msec_value(conf->buflen, prev->buflen, 0);
+    ngx_conf_merge_value(conf->buffer, prev->buffer, 0);
     ngx_conf_merge_msec_value(conf->sync, prev->sync, 300);
     ngx_conf_merge_msec_value(conf->idle_timeout, prev->idle_timeout, 0);
     ngx_conf_merge_value(conf->interleave, prev->interleave, 0);
@@ -553,7 +553,7 @@ ngx_rtmp_live_join(ngx_rtmp_session_t *s, u_char *name, unsigned publisher)
 
     (*stream)->ctx = ctx;
 
-    if (lacf->buflen) {
+    if (lacf->buffer) {
         s->out_buffer = 1;
     }
 
@@ -1138,10 +1138,6 @@ ngx_rtmp_live_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         ss->current_time = cs->timestamp;
     }
 
-    if (data) {
-        ngx_rtmp_free_shared_chain(cscf, data);
-    }
-
     if (rpkt) {
         ngx_rtmp_free_shared_chain(cscf, rpkt);
     }
@@ -1231,7 +1227,7 @@ ngx_rtmp_live_on_fi(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
         { NGX_RTMP_AMF_STRING,
           ngx_null_string,
-          "onFi", 0 },
+          "onFI", 0 },
 
         { NGX_RTMP_AMF_MIXED_ARRAY,
           ngx_null_string,
@@ -1258,7 +1254,7 @@ ngx_rtmp_live_on_fi(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     if (res == NGX_OK) {
 
         ngx_log_error(NGX_LOG_DEBUG, s->connection->log, 0,
-            "live: onFi: date='%s', time='%s'",
+            "live: onFI: date='%s', time='%s'",
             v.date, v.time);
 
         out_dt_elts[0].data = v.date;
@@ -1517,7 +1513,7 @@ ngx_rtmp_live_postconfiguration(ngx_conf_t *cf)
     ch->handler = ngx_rtmp_live_on_cue_point;
 
     ch = ngx_array_push(&cmcf->amf);
-    ngx_str_set(&ch->name, "onFi");
+    ngx_str_set(&ch->name, "onFI");
     ch->handler = ngx_rtmp_live_on_fi;
 
     ch = ngx_array_push(&cmcf->amf);

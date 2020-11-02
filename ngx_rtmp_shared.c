@@ -66,7 +66,8 @@ ngx_rtmp_free_shared_chain(ngx_rtmp_core_srv_conf_t *cscf, ngx_chain_t *in)
     }
 
     for (cl = in; ; cl = cl->next) {
-        if (cl->next == NULL) {
+        /* FIXME: Don't create circular chains in the first place */
+        if (cl->next == NULL || cl->next == in) {
             cl->next = cscf->free;
             cscf->free = in;
             return;

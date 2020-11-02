@@ -9,7 +9,7 @@ $ cd /usr/build
 
 Download & unpack latest nginx-rtmp (you can also use http)
 ```sh
-$ git clone git://github.com/arut/nginx-rtmp-module.git
+$ git clone git://github.com/sergey-dryabzhinsky/nginx-rtmp-module
 ```
 
 Download & unpack nginx (you can also use svn)

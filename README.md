@@ -118,10 +118,8 @@ name - interpreted by each application
 
 ### Multi-worker live streaming
 
-Module supports multi-worker live
-streaming through automatic stream pushing
-to nginx workers. This option is toggled with
-rtmp_auto_push directive.
+This NGINX-RTMP module does not support multi-worker live
+streaming. While this feature can be enabled through rtmp_auto_push on|off directive, it is ill advised because it is incompatible with NGINX versions starting 1.7.2 and up, there for it should not be used.
 
 
 ### Example nginx.conf
@@ -159,7 +157,7 @@ rtmp_auto_push directive.
             application big {
                 live on;
 
-                # On every pusblished stream run this command (ffmpeg)
+                # On every published stream run this command (ffmpeg)
                 # with substitutions: $app/${app}, $name/${name} for application & stream name.
                 #
                 # This ffmpeg call receives stream from this application &
@@ -333,21 +331,6 @@ rtmp_auto_push directive.
                 # Serve DASH fragments
                 root /tmp;
                 add_header Cache-Control no-cache;
-            }
-        }
-    }
-
-
-### Multi-worker streaming example
-
-    rtmp_auto_push on;
-
-    rtmp {
-        server {
-            listen 1935;
-
-            application mytv {
-                live on;
             }
         }
     }

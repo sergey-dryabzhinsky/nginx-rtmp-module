@@ -581,9 +581,9 @@ ngx_rtmp_hls_write_playlist(ngx_rtmp_session_t *s)
     }
 
     if (hacf->allow_client_cache == NGX_RTMP_HLS_CACHE_ENABLED) {
-        p = ngx_slprintf(p, end, "#EXT-X-ALLOW-CACHE:1\n");
+        p = ngx_slprintf(p, end, "#EXT-X-ALLOW-CACHE:YES\n");
     } else if (hacf->allow_client_cache == NGX_RTMP_HLS_CACHE_DISABLED) {
-        p = ngx_slprintf(p, end, "#EXT-X-ALLOW-CACHE:0\n");
+        p = ngx_slprintf(p, end, "#EXT-X-ALLOW-CACHE:NO\n");
     }
 
     n = ngx_write_fd(fd, buffer, p - buffer);
@@ -608,7 +608,7 @@ ngx_rtmp_hls_write_playlist(ngx_rtmp_session_t *s)
 
     for (i = 0; i < ctx->nfrags; i++) {
         f = ngx_rtmp_hls_get_frag(s, i);
-        if (i == 0 && f->datetime && f->datetime->len > 0) {
+        if ((i == 0 || f->discont) && f->datetime && f->datetime->len > 0) {
             p = ngx_snprintf(buffer, sizeof(buffer), "#EXT-X-PROGRAM-DATE-TIME:");
             n = ngx_write_fd(fd, buffer, p - buffer);
             if (n < 0) {
@@ -914,12 +914,13 @@ ngx_rtmp_hls_get_fragment_datetime(ngx_rtmp_session_t *s, uint64_t ts)
         msec += (ts / 90);
         ngx_gmtime(msec / 1000, &tm);
 
-        datetime->data = (u_char *) ngx_pcalloc(s->connection->pool, ngx_cached_http_log_iso8601.len * sizeof(u_char));
-        (void) ngx_sprintf(datetime->data, "%4d-%02d-%02dT%02d:%02d:%02d-00:00",
+        datetime->len = sizeof("1970-01-01T00:00:00.000-00:00") - 1;
+        datetime->data = (u_char *) ngx_pcalloc(s->connection->pool, datetime->len * sizeof(u_char));
+        (void) ngx_sprintf(datetime->data, "%4d-%02d-%02dT%02d:%02d:%02d.%03d-00:00",
                            tm.ngx_tm_year, tm.ngx_tm_mon,
                            tm.ngx_tm_mday, tm.ngx_tm_hour,
-                           tm.ngx_tm_min, tm.ngx_tm_sec);
-        datetime->len = ngx_cached_http_log_iso8601.len;
+                           tm.ngx_tm_min, tm.ngx_tm_sec,
+                           msec % 1000);
         return datetime;
 
     case NGX_RTMP_HLS_DATETIME_SYSTEM:
@@ -1050,7 +1051,7 @@ ngx_rtmp_hls_open_fragment(ngx_rtmp_session_t *s, uint64_t ts,
     }
 
     // This is continuity counter for TS header
-    mpegts_cc = (ctx->nfrags + ctx->frag);
+    mpegts_cc = (ngx_uint_t)(ctx->nfrags + ctx->frag);
 
     ngx_log_debug7(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "hls: open fragment file='%s', keyfile='%s', "
@@ -2101,6 +2102,7 @@ ngx_rtmp_hls_video(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
                         ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                                       "hls: error appending AUD NAL");
                     }
+                    /* fall through */
                 case 9:
                     aud_sent = 1;
                     break;
@@ -2362,8 +2364,11 @@ ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
     }
 }
 
-
+#if (nginx_version >= 1011005)
+static ngx_msec_t
+#else
 static time_t
+#endif
 ngx_rtmp_hls_cleanup(void *data)
 {
     ngx_rtmp_hls_cleanup_t *cleanup = data;
@@ -2371,7 +2376,11 @@ ngx_rtmp_hls_cleanup(void *data)
     ngx_rtmp_hls_cleanup_dir(&cleanup->path, cleanup->playlen);
 
     // Next callback in half of playlist length time
+#if (nginx_version >= 1011005)
+    return cleanup->playlen / 2;
+#else
     return cleanup->playlen / 2000;
+#endif
 }
 
 

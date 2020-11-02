@@ -454,7 +454,7 @@ ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
                         if (sl_next != 0) {
 
                             /* convert to signed: (-1)**k+1 * ceil(k/2) */
-                            sl_udelta = ngx_rtmp_bit_read_golomb(&br);
+                            sl_udelta = (ngx_uint_t)ngx_rtmp_bit_read_golomb(&br);
                             sl_delta = (sl_udelta + 1) >> 1;
                             if ((sl_udelta & 1) == 0) {
                                 sl_delta = -sl_delta;
@@ -900,7 +900,7 @@ ngx_rtmp_codec_meta_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     if (v.profile[0] != '\0') ngx_memcpy(ctx->profile, v.profile, sizeof(v.profile));
     if (v.level[0] != '\0') ngx_memcpy(ctx->level, v.level, sizeof(v.level));
 
-    ngx_log_debug8(NGX_LOG_DEBUG, s->connection->log, 0,
+    ngx_log_debug8(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
             "codec: data frame: "
             "width=%ui height=%ui duration=%.3f frame_rate=%.3f "
             "video=%s (%ui) audio=%s (%ui)",
@@ -909,6 +909,12 @@ ngx_rtmp_codec_meta_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
             ctx->video_codec_id,
             ngx_rtmp_get_audio_codec_name(ctx->audio_codec_id),
             ctx->audio_codec_id);
+
+    ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+            "codec: data frame: "
+            "video_rate=%.3f audio_rate=%.3f ",
+            ctx->video_data_rate, ctx->audio_data_rate
+            );
 
     switch (cacf->meta) {
         case NGX_RTMP_CODEC_META_ON:

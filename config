@@ -14,6 +14,7 @@ RTMP_CORE_MODULES="                                         \
                 ngx_rtmp_relay_module                       \
                 ngx_rtmp_exec_module                        \
                 ngx_rtmp_auto_push_module                   \
+                ngx_rtmp_auto_push_index_module             \
                 ngx_rtmp_notify_module                      \
                 ngx_rtmp_log_module                         \
                 ngx_rtmp_limit_module                       \
@@ -75,6 +76,7 @@ RTMP_CORE_SRCS="                                            \
                 $ngx_addon_dir/hls/ngx_rtmp_hls_module.c    \
                 $ngx_addon_dir/dash/ngx_rtmp_dash_module.c  \
                 $ngx_addon_dir/hls/ngx_rtmp_mpegts.c        \
+                $ngx_addon_dir/hls/ngx_rtmp_mpegts_crc.c    \
                 $ngx_addon_dir/dash/ngx_rtmp_mp4.c          \
                 "
 RTMP_HTTP_SRCS="                                            \
