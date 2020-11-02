@@ -541,9 +541,6 @@ ngx_rtmp_hls_write_playlist(ngx_rtmp_session_t *s)
 
     ngx_rtmp_playlist_t             v;
 
-    ngx_log_error(NGX_LOG_DEBUG, s->connection->log, 0,
-                  "hls: write playlist");
-
     hacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_hls_module);
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
 
