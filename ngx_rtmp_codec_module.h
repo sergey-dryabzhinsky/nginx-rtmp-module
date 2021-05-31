@@ -55,6 +55,7 @@ typedef struct {
     double                      duration;
     double                      frame_rate;
     double                      video_data_rate;
+    double                      video_keyframe_frequency;
     ngx_uint_t                  video_codec_id;
     double                      audio_data_rate;
     ngx_uint_t                  audio_codec_id;

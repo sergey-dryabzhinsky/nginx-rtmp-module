@@ -555,7 +555,17 @@ ngx_rtmp_stat_live(ngx_http_request_t *r, ngx_chain_t ***lll,
                 NGX_RTMP_STAT_L("</height><frame_rate>");
                 NGX_RTMP_STAT(buf, ngx_snprintf(buf, sizeof(buf),
                               "%.3f", codec->frame_rate) - buf);
-                NGX_RTMP_STAT_L("</frame_rate>");
+                NGX_RTMP_STAT_L("</frame_rate><data_rate>");
+                NGX_RTMP_STAT(buf, ngx_snprintf(buf, sizeof(buf),
+                              "%.0f", codec->video_data_rate) - buf);
+                NGX_RTMP_STAT_L("</data_rate>");
+
+                if(codec->video_keyframe_frequency) {
+                  NGX_RTMP_STAT_L("<keyframe_frequency>");
+                  NGX_RTMP_STAT(buf, ngx_snprintf(buf, sizeof(buf),
+                                "%.0f", codec->video_keyframe_frequency) - buf);
+                  NGX_RTMP_STAT_L("</keyframe_frequency>");
+                }
 
                 cname = ngx_rtmp_get_video_codec_name(codec->video_codec_id);
                 if (*cname) {
@@ -614,6 +624,12 @@ ngx_rtmp_stat_live(ngx_http_request_t *r, ngx_chain_t ***lll,
                     NGX_RTMP_STAT(buf, ngx_snprintf(buf, sizeof(buf),
                                   "%ui", codec->sample_rate) - buf);
                     NGX_RTMP_STAT_L("</sample_rate>");
+                }
+                if (codec->audio_data_rate) {
+                    NGX_RTMP_STAT_L("<data_rate>");
+                    NGX_RTMP_STAT(buf, ngx_snprintf(buf, sizeof(buf),
+                                  "%0.0f", codec->audio_data_rate) - buf);
+                    NGX_RTMP_STAT_L("</data_rate>");
                 }
                 NGX_RTMP_STAT_L("</audio>");
 
