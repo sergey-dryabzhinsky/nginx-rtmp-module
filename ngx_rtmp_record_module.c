@@ -1103,7 +1103,7 @@ ngx_rtmp_record_node_avd(ngx_rtmp_session_t *s, ngx_rtmp_record_rec_ctx_t *rctx,
         return NGX_OK;
     }
 
-    if (rracf->interval != NGX_CONF_UNSET_MSEC)
+    if (brkframe && rracf->interval != NGX_CONF_UNSET_MSEC)
     {
 	// record interval should work if set, manual mode or not
         next = rctx->last;
