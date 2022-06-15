@@ -87,6 +87,14 @@ static ngx_command_t  ngx_rtmp_record_commands[] = {
       offsetof(ngx_rtmp_record_app_conf_t, suffix),
       NULL },
 
+    { ngx_string("record_wait_keyframe"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|
+                         NGX_RTMP_REC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_record_app_conf_t, wait_keyframe),
+      NULL },
+
     { ngx_string("record_unique"),
       NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|
                          NGX_RTMP_REC_CONF|NGX_CONF_TAKE1,
@@ -206,6 +214,7 @@ ngx_rtmp_record_create_app_conf(ngx_conf_t *cf)
     racf->interval_size = NGX_CONF_UNSET_SIZE;
     racf->max_frames = NGX_CONF_UNSET_SIZE;
     racf->interval = NGX_CONF_UNSET_MSEC;
+    racf->wait_keyframe = NGX_CONF_UNSET;
     racf->unique = NGX_CONF_UNSET;
     racf->append = NGX_CONF_UNSET;
     racf->lock_file = NGX_CONF_UNSET;
@@ -232,6 +241,7 @@ ngx_rtmp_record_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_size_value(conf->max_size, prev->max_size, 0);
     ngx_conf_merge_size_value(conf->interval_size, prev->interval_size, 0);
     ngx_conf_merge_size_value(conf->max_frames, prev->max_frames, 0);
+    ngx_conf_merge_value(conf->wait_keyframe, prev->wait_keyframe, 0);
     ngx_conf_merge_value(conf->unique, prev->unique, 0);
     ngx_conf_merge_value(conf->append, prev->append, 0);
     ngx_conf_merge_value(conf->lock_file, prev->lock_file, 0);
@@ -1111,13 +1121,17 @@ ngx_rtmp_record_node_avd(ngx_rtmp_session_t *s, ngx_rtmp_record_rec_ctx_t *rctx,
         next.sec  += (next.msec / 1000);
         next.msec %= 1000;
 
-        if (ngx_cached_time->sec  > next.sec ||
-           (ngx_cached_time->sec == next.sec &&
-           ngx_cached_time->msec > next.msec))
+        if ((rracf->wait_keyframe && keyframe) ||
+            !rracf->wait_keyframe)
+        {
+            if (ngx_cached_time->sec  > next.sec ||
+               (ngx_cached_time->sec == next.sec &&
+               ngx_cached_time->msec > next.msec))
             {
-		ngx_rtmp_record_node_close(s, rctx);
+                ngx_rtmp_record_node_close(s, rctx);
                 ngx_rtmp_record_node_open(s, rctx);
             }
+        }
     }
     else if (!rctx->failed)
     {
