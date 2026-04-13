@@ -8,6 +8,7 @@
 #include "ngx_rtmp.h"
 #include "ngx_rtmp_amf.h"
 #include "ngx_rtmp_streams.h"
+#include "ngx_rtmp_transitions.h"
 
 
 #define NGX_RTMP_USER_START(s, tp)                                          \
@@ -984,4 +985,190 @@ ngx_rtmp_send_sample_access(ngx_rtmp_session_t *s)
 {
     return ngx_rtmp_send_shared_packet(s,
            ngx_rtmp_create_sample_access(s));
+}
+
+/* -------------------------------------- For bandwidth detection ---------------------------------- */
+
+ngx_chain_t *
+ngx_rtmp_create_bwcheck(ngx_rtmp_session_t *s, u_char *payload, size_t plength)
+{
+    ngx_rtmp_header_t               h;
+
+    static double                   trans;
+
+    static ngx_rtmp_amf_elt_t       out_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_null_string,
+          "onBWCheck", 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_null_string,
+          &trans, 0 },
+
+        { NGX_RTMP_AMF_NULL,
+          ngx_null_string,
+          NULL, 0 },
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_null_string,
+          NULL, 0 },
+    };
+
+    if (payload != NULL) {
+        out_elts[3].data = payload;
+        out_elts[3].len = plength;
+    }
+    trans = NGX_RTMP_BANDWIDTH_DETECTION_BWCHECK_TRANS;
+
+    memset(&h, 0, sizeof(h));
+
+    h.type = NGX_RTMP_MSG_AMF_CMD;
+    h.csid = NGX_RTMP_CSID_AMF;
+    h.msid = NGX_RTMP_MSID;
+
+    return ngx_rtmp_create_amf(s, &h, out_elts,
+                               sizeof(out_elts) / sizeof(out_elts[0]));
+}
+
+ngx_int_t
+ngx_rtmp_send_bwcheck(ngx_rtmp_session_t *s, u_char *payload, size_t plength)
+{
+    return ngx_rtmp_send_shared_packet(s,
+           ngx_rtmp_create_bwcheck(s, payload, plength));
+}
+
+
+ngx_chain_t *
+ngx_rtmp_create_bwdone(ngx_rtmp_session_t *s,
+                                         double kbitDown, ngx_uint_t deltaDown, double deltaTime, ngx_msec_t latency)
+{
+    ngx_rtmp_header_t               h;
+
+    static double                   trans;
+    static struct {
+        double                  kbitDown;
+        double                  deltaDown;
+        double                  deltaTime;
+        double                  latency;
+    } v;
+
+    static ngx_rtmp_amf_elt_t       out_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_null_string,
+          "onBWDone", 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_null_string,
+          &trans, 0 },
+
+        { NGX_RTMP_AMF_NULL,
+          ngx_null_string,
+          NULL, 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_null_string,
+          &v.kbitDown, 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_null_string,
+          &v.deltaDown, 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_null_string,
+          &v.deltaTime, 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_null_string,
+          &v.latency, 0 },
+
+    };
+
+    ngx_memzero(&v, sizeof(v));
+    v.kbitDown = kbitDown;
+    v.deltaDown = deltaDown;
+    v.deltaTime = deltaTime;
+    v.latency = latency;
+    trans = NGX_RTMP_BANDWIDTH_DETECTION_BWDONE_TRANS;
+
+    memset(&h, 0, sizeof(h));
+
+    h.type = NGX_RTMP_MSG_AMF_CMD;
+    h.csid = NGX_RTMP_CSID_AMF;
+    h.msid = NGX_RTMP_MSID;
+
+    return ngx_rtmp_create_amf(s, &h, out_elts,
+                               sizeof(out_elts) / sizeof(out_elts[0]));
+}
+
+
+ngx_int_t
+ngx_rtmp_send_bwdone(ngx_rtmp_session_t *s,
+                                         double kbitDown, ngx_uint_t deltaDown, double deltaTime, ngx_msec_t latency)
+{
+    return ngx_rtmp_send_shared_packet(s,
+           ngx_rtmp_create_bwdone(s, kbitDown, deltaDown, deltaTime, latency));
+}
+
+
+ngx_int_t
+ngx_rtmp_send_onclientbwcheck(ngx_rtmp_session_t *s, double inTrans,
+                              double cOutBytes, double cInBytes, ngx_uint_t inTime)
+{
+    ngx_rtmp_header_t           h;
+
+    static struct {
+        double                  cOutBytes;
+        double                  cInBytes;
+        ngx_msec_t              time;
+        double                  trans;
+    } v;
+
+    static ngx_rtmp_amf_elt_t  out_inf[] = {
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("cOutBytes"),
+          &v.cOutBytes, 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("cInBytes"),
+          &v.cInBytes, 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_string("time"),
+          &v.time, 0 },
+
+    };
+
+    static ngx_rtmp_amf_elt_t  out_elts[] = {
+
+        { NGX_RTMP_AMF_STRING,
+          ngx_null_string,
+          "_result", 0 },
+
+        { NGX_RTMP_AMF_NUMBER,
+          ngx_null_string,
+          &v.trans, 0 },
+
+        { NGX_RTMP_AMF_OBJECT,
+          ngx_null_string,
+          out_inf, sizeof(out_inf) },
+
+    };
+
+    ngx_memzero(&v, sizeof(v));
+
+    v.cOutBytes = cOutBytes;
+    v.cInBytes = cInBytes;
+    v.time = inTime;
+    v.trans = inTrans;
+
+    ngx_memzero(&h, sizeof(h));
+    h.csid = NGX_RTMP_CSID_AMF_INI;
+    h.type = NGX_RTMP_MSG_AMF_CMD;
+
+    return ngx_rtmp_send_amf(s, &h, out_elts,
+                             sizeof(out_elts) / sizeof(out_elts[0])) == NGX_OK ?
+           NGX_DONE : NGX_ERROR;
 }
